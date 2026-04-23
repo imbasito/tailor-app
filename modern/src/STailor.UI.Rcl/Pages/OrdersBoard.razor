@@ -1,0 +1,2599 @@
+@page "/orders"
+@page "/orders/board"
+@using Microsoft.AspNetCore.Components
+@using STailor.Shared.Contracts.Orders
+@using STailor.UI.Rcl.Services
+@inject OrderWorklistService WorklistService
+@inject NavigationManager NavigationManager
+@inject WorkspaceSettingsService WorkspaceSettings
+
+<section class="orders-shell">
+    <header class="orders-header">
+        <h1>Orders</h1>
+        <p>Keep today&apos;s queue, late work, and payment follow-up in one place.</p>
+    </header>
+
+    @if (_hasLoaded)
+    {
+        <section class="summary-grid" aria-label="Board summary">
+            <article class="summary-card">
+                <h3>Orders</h3>
+                <p class="summary-value">@_summary.TotalOrders</p>
+                <p class="summary-meta">Overdue: @_summary.OverdueCount | Due today: @_summary.DueTodayCount</p>
+                <p class="summary-meta">At risk: @_summary.AtRiskCount</p>
+            </article>
+
+            <article class="summary-card">
+                <h3>Lifecycle</h3>
+                <p class="summary-meta">New: @_summary.NewCount | Progress: @_summary.InProgressCount</p>
+                <p class="summary-meta">Trial: @_summary.TrialFittingCount | Rework: @_summary.ReworkCount</p>
+                <p class="summary-meta">Ready: @_summary.ReadyCount | Delivered: @_summary.DeliveredCount</p>
+                <p class="summary-meta">Ready with balance: @_summary.ReadyWithBalanceCount</p>
+            </article>
+
+            <article class="summary-card">
+                <h3>Financials</h3>
+                <p class="summary-meta">Charged: @_summary.TotalCharged</p>
+                <p class="summary-meta">Paid: @_summary.TotalPaid</p>
+                <p class="summary-meta">Collected: @FormatPercent(_summary.CollectionRatePercent)</p>
+                <p class="summary-value">Balance: @_summary.TotalBalanceDue</p>
+            </article>
+        </section>
+    }
+
+    <div class="filters-grid">
+        <label>
+            Max Items
+            <input type="number" min="1" max="500" @bind="_maxItems" />
+        </label>
+
+        <label>
+            Status
+            <select @bind="_statusFilter">
+                <option value="Any">Any</option>
+                <option value="New">New</option>
+                <option value="InProgress">In Progress</option>
+                <option value="TrialFitting">Trial/Fitting</option>
+                <option value="Rework">Rework</option>
+                <option value="Ready">Ready</option>
+                <option value="Delivered">Delivered</option>
+            </select>
+        </label>
+
+        <label>
+            Due On Or Before
+            <input type="date" @bind="_dueOnOrBeforeDate" />
+        </label>
+
+        <label class="checkbox-item">
+            <input type="checkbox" @bind="_includeDelivered" />
+            Include delivered orders
+        </label>
+
+        <label class="checkbox-item">
+            <input type="checkbox" @bind="_overdueOnly" />
+            Overdue only
+        </label>
+    </div>
+
+    <div class="preset-row">
+        <span class="preset-label">Shortcuts</span>
+        <div class="preset-buttons">
+            <button type="button" class="@GetPresetButtonClass(OrdersBoardQuickPreset.TodayDue)" disabled="@_isLoading" @onclick="() => ApplyQuickPresetAsync(OrdersBoardQuickPreset.TodayDue)">Today</button>
+            <button type="button" class="@GetPresetButtonClass(OrdersBoardQuickPreset.Late)" disabled="@_isLoading" @onclick="() => ApplyQuickPresetAsync(OrdersBoardQuickPreset.Late)">Late</button>
+            <button type="button" class="@GetPresetButtonClass(OrdersBoardQuickPreset.DueThisWeek)" disabled="@_isLoading" @onclick="() => ApplyQuickPresetAsync(OrdersBoardQuickPreset.DueThisWeek)">Due This Week</button>
+            <button type="button" class="@GetPresetButtonClass(OrdersBoardQuickPreset.Unpaid)" disabled="@_isLoading" @onclick="() => ApplyQuickPresetAsync(OrdersBoardQuickPreset.Unpaid)">Unpaid</button>
+            <button type="button" class="@GetPresetButtonClass(OrdersBoardQuickPreset.Ready)" disabled="@_isLoading" @onclick="() => ApplyQuickPresetAsync(OrdersBoardQuickPreset.Ready)">Ready</button>
+            <button type="button" class="@GetPresetButtonClass(OrdersBoardQuickPreset.Delivered)" disabled="@_isLoading" @onclick="() => ApplyQuickPresetAsync(OrdersBoardQuickPreset.Delivered)">Delivered</button>
+            <button type="button" class="ghost-button" disabled="@_isLoading" @onclick="ResetFiltersAsync">Reset</button>
+        </div>
+    </div>
+
+    <div class="actions-row">
+        <button type="button" disabled="@_isLoading" @onclick="LoadAsync">
+            @(_isLoading ? "Loading..." : "Refresh Orders")
+        </button>
+        <div class="actions-meta">
+            @if (_hasLoaded)
+            {
+                <span class="meta">Updated: @_lastLoadedAtUtc.ToString("yyyy-MM-dd HH:mm 'UTC'")</span>
+            }
+            <button type="button" class="ghost-button density-toggle" @onclick="ToggleOrderDensity">
+                @(_useCompactOrderCards ? "Comfortable" : "Compact")
+            </button>
+        </div>
+    </div>
+
+    @if (!string.IsNullOrWhiteSpace(_errorMessage))
+    {
+        <div class="error-box" role="alert">@_errorMessage</div>
+    }
+
+    @if (!string.IsNullOrWhiteSpace(_actionMessage))
+    {
+        <div class="action-feedback @(_isActionSuccess ? "ok" : "error")" role="status">@_actionMessage</div>
+    }
+
+    @if (_items.Count == 0 && _hasLoaded && string.IsNullOrWhiteSpace(_errorMessage))
+    {
+        <div class="empty-box" role="status">No orders matched your filters.</div>
+    }
+
+    @if (_groupedItems.Count > 0)
+    {
+        @foreach (var group in _groupedItems)
+        {
+            var groupBulkAdvancePlan = OrdersBoardBulkAdvancePlanner.BuildPlan(group);
+            var groupBulkAdvanceStatus = GetGroupBulkAdvanceStatus(group.Kind);
+            var groupRetryCandidates = BuildSafeRetryCandidates(groupBulkAdvanceStatus);
+            var groupRetryCount = groupRetryCandidates.Count;
+
+            <section class="group-section @GetGroupSectionClass(group.Kind)">
+                <header class="group-header">
+                    <div class="group-heading">
+                        <h3>@group.Title</h3>
+                        <span class="group-count">@group.Items.Count</span>
+                    </div>
+
+                    <div class="group-actions">
+                        @if (groupBulkAdvancePlan.HasEligible || groupRetryCount > 0)
+                        {
+                            <button type="button"
+                                    class="group-bulk-toggle-button"
+                                    @onclick="() => ToggleBulkActions(group.Kind)">
+                                @GetBulkActionsToggleText(group.Kind)
+                            </button>
+                        }
+                        <button type="button"
+                                class="group-toggle-button"
+                                @onclick="() => ToggleGroup(group.Kind)">
+                            @GetGroupToggleText(IsGroupCollapsed(group.Kind))
+                        </button>
+                    </div>
+                </header>
+
+                @if (IsBulkActionsOpen(group.Kind))
+                {
+                    <div class="group-bulk-actions">
+                        @if (groupRetryCount > 0)
+                        {
+                            <a class="group-action-link" href="@BuildGroupRetryableWhatsAppLink(group, groupRetryCandidates)">Retryable Summary</a>
+                        }
+                        <button type="button"
+                                class="group-advance-button"
+                                disabled="@(_isLoading || _isBulkAdvancing || !groupBulkAdvancePlan.HasEligible)"
+                                @onclick="() => PrepareGroupBulkAdvance(groupBulkAdvancePlan)">
+                            @GetGroupAdvanceButtonText(groupBulkAdvancePlan)
+                        </button>
+                        <button type="button"
+                                class="group-retry-button"
+                                disabled="@(_isLoading || _isBulkAdvancing || groupRetryCount == 0)"
+                                @onclick="() => PrepareGroupRetry(group.Kind)">
+                            @GetRetryFailedButtonText(group.Kind, groupRetryCount)
+                        </button>
+                    </div>
+                }
+
+                @if (groupBulkAdvanceStatus is not null)
+                {
+                    var failedInlineText = BuildFailedCustomerInlineText(groupBulkAdvanceStatus, 3);
+                    var retryableNowLabel = OrdersBoardBulkResultMetaBuilder.BuildRetryableNowLabel(groupRetryCount);
+                    var retryableDetails = OrdersBoardRetryableDetailsBuilder.Build(groupRetryCandidates, 12);
+                    var isRetryableDetailsExpanded = IsRetryableDetailsExpanded(group.Kind);
+
+                    <div class="group-bulk-result @GetGroupBulkResultClass(groupBulkAdvanceStatus)">
+                        <div class="group-bulk-result-main">
+                            <span>@groupBulkAdvanceStatus.Summary.Message</span>
+
+                            @if (!string.IsNullOrWhiteSpace(failedInlineText))
+                            {
+                                <span class="group-bulk-failed-meta">@failedInlineText</span>
+                            }
+
+                            @if (isRetryableDetailsExpanded && retryableDetails.HasItems)
+                            {
+                                <ul class="group-bulk-retryable-list">
+                                    @foreach (var retryableItem in retryableDetails.Items)
+                                    {
+                                        <li>
+                                            <strong>@retryableItem.CustomerName</strong>
+                                            <span class="group-bulk-retryable-order">(@FormatOrderToken(retryableItem.OrderId))</span>
+                                            <span> -> @FormatStatusLabel(retryableItem.TargetStatus)</span>
+                                        </li>
+                                    }
+                                </ul>
+
+                                @if (retryableDetails.IsTruncated)
+                                {
+                                    <p class="group-bulk-retryable-more">...and @retryableDetails.HiddenCount more retryable order(s).</p>
+                                }
+                            }
+                        </div>
+
+                        <div class="group-bulk-result-meta">
+                            @if (groupBulkAdvanceStatus.LastFailedAtUtc is not null)
+                            {
+                                <span class="group-bulk-result-chip warning">Last failed: @FormatUtcTimestamp(groupBulkAdvanceStatus.LastFailedAtUtc.Value)</span>
+                            }
+
+                            <span class="group-bulk-result-chip @GetRetryableNowChipClass(groupRetryCount)">@retryableNowLabel</span>
+
+                            @if (groupRetryCount > 3 && retryableDetails.HasItems)
+                            {
+                                <button type="button"
+                                        class="group-bulk-result-link"
+                                        @onclick="() => ToggleRetryableDetails(group.Kind)">
+                                    @GetRetryableDetailsToggleText(isRetryableDetailsExpanded, groupRetryCount)
+                                </button>
+                            }
+
+                            <span class="group-bulk-result-time">@FormatUtcTimestamp(groupBulkAdvanceStatus.OccurredAtUtc)</span>
+                        </div>
+                    </div>
+                }
+
+                @if (_pendingBulkAdvancePlan?.GroupKind == group.Kind)
+                {
+                    var pendingPlan = _pendingBulkAdvancePlan!;
+                    var bulkPreview = OrdersBoardBulkAdvancePlanner.BuildPreview(pendingPlan, 5);
+                    var targetDistribution = OrdersBoardBulkAdvancePlanner.BuildTargetDistribution(pendingPlan);
+
+                    <div class="group-bulk-confirm" role="status">
+                        <p>
+                            Advance @pendingPlan.EligibleCount eligible order(s) in @group.Title?
+                            This applies the next workflow step per order.
+                        </p>
+
+                        @if (targetDistribution.Count > 0)
+                        {
+                            <div class="group-bulk-distribution">
+                                @foreach (var target in targetDistribution)
+                                {
+                                    <span class="group-bulk-distribution-item">
+                                        @FormatStatusLabel(target.TargetStatus): @target.Count
+                                    </span>
+                                }
+                            </div>
+                        }
+
+                        @if (bulkPreview.Items.Count > 0)
+                        {
+                            <ul class="group-bulk-preview-list">
+                                @foreach (var previewItem in bulkPreview.Items)
+                                {
+                                    <li>
+                                        <strong>@previewItem.CustomerName</strong>
+                                        <span> -> @FormatStatusLabel(previewItem.TargetStatus)</span>
+                                    </li>
+                                }
+                            </ul>
+
+                            @if (bulkPreview.IsTruncated)
+                            {
+                                <p class="group-bulk-preview-more">...and @bulkPreview.HiddenCount more order(s).</p>
+                            }
+                        }
+
+                        <div class="group-bulk-confirm-buttons">
+                            <button type="button"
+                                    class="group-bulk-confirm-button"
+                                    disabled="@_isBulkAdvancing"
+                                    @onclick="ConfirmGroupBulkAdvanceAsync">
+                                @GetConfirmGroupAdvanceText(pendingPlan)
+                            </button>
+                            <button type="button"
+                                    class="group-bulk-cancel-button"
+                                    disabled="@_isBulkAdvancing"
+                                    @onclick="CancelGroupBulkAdvance">
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                }
+
+                @if (_pendingRetryGroupKind == group.Kind && groupRetryCount > 0)
+                {
+                    var retryPreview = OrdersBoardBulkAdvanceRetryPlanner.BuildPreview(groupRetryCandidates, 5);
+                    var retryDistribution = OrdersBoardBulkAdvanceRetryPlanner.BuildTargetDistribution(groupRetryCandidates);
+
+                    <div class="group-retry-confirm" role="status">
+                        <p>
+                            Retry @groupRetryCount failed order(s) in @group.Title?
+                            This retries only failed transitions that still match current safe next-step rules.
+                        </p>
+
+                        @if (retryDistribution.Count > 0)
+                        {
+                            <div class="group-bulk-distribution">
+                                @foreach (var target in retryDistribution)
+                                {
+                                    <span class="group-bulk-distribution-item">
+                                        @FormatStatusLabel(target.TargetStatus): @target.Count
+                                    </span>
+                                }
+                            </div>
+                        }
+
+                        @if (retryPreview.Items.Count > 0)
+                        {
+                            <ul class="group-bulk-preview-list">
+                                @foreach (var previewItem in retryPreview.Items)
+                                {
+                                    <li>
+                                        <strong>@previewItem.CustomerName</strong>
+                                        <span> -> @FormatStatusLabel(previewItem.TargetStatus)</span>
+                                    </li>
+                                }
+                            </ul>
+
+                            @if (retryPreview.IsTruncated)
+                            {
+                                <p class="group-bulk-preview-more">...and @retryPreview.HiddenCount more order(s).</p>
+                            }
+                        }
+
+                        <div class="group-bulk-confirm-buttons">
+                            <button type="button"
+                                    class="group-retry-confirm-button"
+                                    disabled="@_isBulkAdvancing"
+                                    @onclick="ConfirmGroupRetryAsync">
+                                @GetConfirmGroupRetryText(group.Kind, groupRetryCount)
+                            </button>
+                            <button type="button"
+                                    class="group-bulk-cancel-button"
+                                    disabled="@_isBulkAdvancing"
+                                    @onclick="CancelGroupRetry">
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                }
+
+                @if (!IsGroupCollapsed(group.Kind))
+                {
+                    <div class="@GetCardsGridClass()">
+                        @foreach (var item in group.Items)
+                        {
+                            <article class="@GetOrderCardClass()">
+                                <header>
+                                    <div class="card-heading">
+                                        <h2>@item.CustomerName</h2>
+                                        <p class="card-subtitle">@item.GarmentType</p>
+                                    </div>
+                                    <span class="status-pill @GetStatusClass(item.Status)">@FormatStatusLabel(item.Status)</span>
+                                </header>
+
+                                <div class="card-summary-band">
+                                    <span class="summary-chip @GetDueChipClass(item)">Due @item.DueAtUtc.ToString("yyyy-MM-dd")</span>
+                                    @if (item.BalanceDue > 0m)
+                                    {
+                                        <span class="summary-chip money">Balance @item.BalanceDue</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="summary-chip settled">Paid up</span>
+                                    }
+                                </div>
+
+                                <dl class="order-facts">
+                                    <div>
+                                        <dt>Order</dt>
+                                        <dd>@FormatOrderToken(item.OrderId)</dd>
+                                    </div>
+                                    <div>
+                                        <dt>Phone</dt>
+                                        <dd>@item.PhoneNumber</dd>
+                                    </div>
+                                    <div>
+                                        <dt>City</dt>
+                                        <dd>@item.City</dd>
+                                    </div>
+                                    <div>
+                                        <dt>Received</dt>
+                                        <dd>@item.ReceivedAtUtc.ToString("yyyy-MM-dd")</dd>
+                                    </div>
+                                    <div>
+                                        <dt>Charged</dt>
+                                        <dd>@item.AmountCharged</dd>
+                                    </div>
+                                    <div>
+                                        <dt>Paid</dt>
+                                        <dd>@item.AmountPaid</dd>
+                                    </div>
+                                </dl>
+
+                                <div class="status-action-panel">
+                                    @if (TryGetNextStatus(item.Status, out var nextStatus))
+                                    {
+                                        <span class="status-action-copy">Next step</span>
+                                        <button type="button"
+                                                class="status-primary-button"
+                                                disabled="@(_isLoading || _transitioningOrderId == item.OrderId || _deletingOrderId == item.OrderId || _submittingPaymentOrderId == item.OrderId)"
+                                                @onclick="() => AdvanceStatusAsync(item.OrderId, nextStatus!)">
+                                            @GetAdvanceButtonText(item.OrderId, nextStatus!)
+                                        </button>
+                                    }
+                                    else
+                                    {
+                                        <span class="complete-pill">Lifecycle complete</span>
+                                    }
+                                </div>
+
+                                <div class="card-actions">
+                                    <div class="card-action-group secondary-actions">
+                                        <a class="action-link neutral" href="@BuildOrderDetailLink(item.OrderId)">Open Order</a>
+                                        <a class="action-link neutral" href="@BuildCustomerWorkspaceLink(item.CustomerId)">Open Customer</a>
+                                    </div>
+
+                                    @if (item.BalanceDue > 0m)
+                                    {
+                                        <div class="card-action-group money-actions">
+                                            <button type="button"
+                                                    class="payment-button"
+                                                    disabled="@(_isLoading || _transitioningOrderId == item.OrderId || _deletingOrderId == item.OrderId || _submittingPaymentOrderId == item.OrderId)"
+                                                @onclick="() => PreparePayment(item.OrderId, item.BalanceDue)">
+                                                @GetPaymentButtonText(item.OrderId)
+                                            </button>
+                                        </div>
+                                    }
+
+                                    <div class="card-action-group whatsapp-actions">
+                                        <a class="action-link" href="@BuildWhatsAppLink(item, useDueBalanceTemplate: false)"><span class="whatsapp-glyph" aria-hidden="true"></span>Status Update</a>
+                                        <a class="action-link" href="@BuildWhatsAppLink(item, useDueBalanceTemplate: true)"><span class="whatsapp-glyph" aria-hidden="true"></span>Due and Balance</a>
+                                    </div>
+
+                                    <div class="card-action-group danger-actions">
+                                        <button type="button"
+                                                class="delete-button"
+                                                disabled="@(_isLoading || _transitioningOrderId == item.OrderId || _deletingOrderId == item.OrderId || _submittingPaymentOrderId == item.OrderId)"
+                                                @onclick="() => PrepareDelete(item.OrderId)">
+                                            @GetDeleteButtonText(item.OrderId)
+                                        </button>
+                                    </div>
+                                </div>
+
+                                @if (_pendingPaymentOrderId == item.OrderId)
+                                {
+                                    <div class="card-payment-panel" role="status">
+                                        <p>
+                                            Record a payment for <strong>@item.CustomerName</strong>.
+                                            Current balance: <strong>@item.BalanceDue</strong>.
+                                        </p>
+                                        <div class="card-payment-grid">
+                                            <label>
+                                                Payment Amount
+                                            <input type="number" min="0.01" max="@item.BalanceDue" step="0.01" @bind="_paymentAmountDraft" />
+                                            </label>
+                                            <label>
+                                                Note (Optional)
+                                                <input type="text" @bind="_paymentNoteDraft" placeholder="Cash, transfer, pickup" />
+                                            </label>
+                                        </div>
+                                        <div class="card-payment-buttons">
+                                            <button type="button"
+                                                    class="card-payment-confirm-button"
+                                                    disabled="@(_submittingPaymentOrderId == item.OrderId)"
+                @onclick="() => SubmitPaymentAsync(item.OrderId, item.CustomerName, item.BalanceDue)">
+                                                @GetSavePaymentText(item.OrderId)
+                                            </button>
+                                            <button type="button"
+                                                    class="card-payment-cancel-button"
+                                                    disabled="@(_submittingPaymentOrderId == item.OrderId)"
+                                                    @onclick="CancelPayment">
+                                                Cancel
+                                            </button>
+                                        </div>
+                                    </div>
+                                }
+
+                                @if (_pendingDeleteOrderId == item.OrderId)
+                                {
+                                    <div class="card-delete-confirm" role="status">
+                                        <p>
+                                            Delete this order for <strong>@item.CustomerName</strong>?
+                                            This removes it from the local store and syncs the delete upstream.
+                                        </p>
+                                        <div class="card-delete-confirm-buttons">
+                                            <button type="button"
+                                                    class="card-delete-confirm-button"
+                                                    disabled="@(_deletingOrderId == item.OrderId)"
+                                                    @onclick="() => ConfirmDeleteAsync(item.OrderId, item.CustomerName)">
+                                                Confirm Delete
+                                            </button>
+                                            <button type="button"
+                                                    class="card-delete-cancel-button"
+                                                    disabled="@(_deletingOrderId == item.OrderId)"
+                                                    @onclick="CancelDelete">
+                                                Cancel
+                                            </button>
+                                        </div>
+                                    </div>
+                                }
+                            </article>
+                        }
+                    </div>
+                }
+            </section>
+        }
+    }
+</section>
+
+@code {
+    private const int DefaultMaxItems = 80;
+    private const bool DefaultIncludeDelivered = false;
+    private const bool DefaultOverdueOnly = false;
+    private const string DefaultStatusFilter = OrdersBoardFilterStateMapper.AnyStatus;
+
+    [Parameter]
+    [SupplyParameterFromQuery(Name = "maxItems")]
+    public int? MaxItemsQuery { get; set; }
+
+    [Parameter]
+    [SupplyParameterFromQuery(Name = "includeDelivered")]
+    public bool? IncludeDeliveredQuery { get; set; }
+
+    [Parameter]
+    [SupplyParameterFromQuery(Name = "overdueOnly")]
+    public bool? OverdueOnlyQuery { get; set; }
+
+    [Parameter]
+    [SupplyParameterFromQuery(Name = "status")]
+    public string? StatusQuery { get; set; }
+
+    [Parameter]
+    [SupplyParameterFromQuery(Name = "dueOnOrBefore")]
+    public string? DueOnOrBeforeQuery { get; set; }
+
+    [Parameter]
+    [SupplyParameterFromQuery(Name = "collapsedGroups")]
+    public string? CollapsedGroupsQuery { get; set; }
+
+    [Parameter]
+    [SupplyParameterFromQuery(Name = "preset")]
+    public string? PresetQuery { get; set; }
+
+    private string _apiBaseUrl = WorkspaceSettingsService.DefaultApiBaseUrl;
+    private int _maxItems = DefaultMaxItems;
+    private bool _includeDelivered = DefaultIncludeDelivered;
+    private bool _overdueOnly = DefaultOverdueOnly;
+    private string _statusFilter = DefaultStatusFilter;
+    private DateTime? _dueOnOrBeforeDate;
+    private bool _isLoading;
+    private bool _hasLoaded;
+    private DateTimeOffset _lastLoadedAtUtc;
+    private string? _errorMessage;
+    private string? _actionMessage;
+    private bool _isActionSuccess;
+    private Guid? _transitioningOrderId;
+    private Guid? _pendingPaymentOrderId;
+    private Guid? _submittingPaymentOrderId;
+    private Guid? _pendingDeleteOrderId;
+    private Guid? _deletingOrderId;
+    private decimal? _paymentAmountDraft;
+    private string? _paymentNoteDraft;
+    private bool _isBulkAdvancing;
+    private string? _lastAppliedFilterQueryKey;
+    private string? _lastAppliedCollapsedGroupsQueryKey;
+    private string? _lastAppliedPresetQueryKey;
+    private OrdersBoardWorklistGroupKind? _bulkAdvancingGroupKind;
+    private OrdersBoardBulkAdvancePlan? _pendingBulkAdvancePlan;
+    private OrdersBoardWorklistGroupKind? _pendingRetryGroupKind;
+    private OrdersBoardWorklistGroupKind? _openBulkActionsGroupKind;
+    private readonly Dictionary<OrdersBoardWorklistGroupKind, GroupBulkAdvanceStatus> _groupBulkAdvanceStatuses = [];
+    private readonly HashSet<OrdersBoardWorklistGroupKind> _expandedRetryableDetailKinds = [];
+    private OrdersBoardSummary _summary = OrdersBoardSummaryBuilder.Empty;
+    private OrdersBoardQuickPreset? _selectedPreset;
+    private bool _useCompactOrderCards = true;
+    private readonly OrdersBoardGroupUiState _groupUiState = new();
+    private IReadOnlyList<OrdersBoardWorklistGroup> _groupedItems = [];
+    private List<OrderWorklistItemDto> _items = [];
+
+    protected override async Task OnParametersSetAsync()
+    {
+        var filterQueryKey = OrdersBoardFilterStateMapper.BuildQueryFingerprint(
+            MaxItemsQuery,
+            IncludeDeliveredQuery,
+            OverdueOnlyQuery,
+            StatusQuery,
+            DueOnOrBeforeQuery);
+
+        var collapsedGroupsQueryKey = OrdersBoardGroupUiState.BuildCollapsedGroupsQueryValue(
+                OrdersBoardGroupUiState.ParseCollapsedGroupsQuery(CollapsedGroupsQuery))
+            ?? string.Empty;
+
+        var presetQueryKey = OrdersBoardFilterStateMapper.ToPresetQueryValue(
+                OrdersBoardFilterStateMapper.ParsePreset(PresetQuery))
+            ?? string.Empty;
+
+        var filterChanged = !string.Equals(_lastAppliedFilterQueryKey, filterQueryKey, StringComparison.Ordinal);
+        var collapsedGroupsChanged = !string.Equals(_lastAppliedCollapsedGroupsQueryKey, collapsedGroupsQueryKey, StringComparison.Ordinal);
+        var presetChanged = !string.Equals(_lastAppliedPresetQueryKey, presetQueryKey, StringComparison.Ordinal);
+        if (!filterChanged && !collapsedGroupsChanged && !presetChanged)
+        {
+            return;
+        }
+
+        _lastAppliedFilterQueryKey = filterQueryKey;
+        _lastAppliedCollapsedGroupsQueryKey = collapsedGroupsQueryKey;
+        _lastAppliedPresetQueryKey = presetQueryKey;
+
+        var filters = OrdersBoardFilterStateMapper.FromQuery(
+            WorkspaceSettings.ApiBaseUrl,
+            DefaultMaxItems,
+            DefaultIncludeDelivered,
+            DefaultOverdueOnly,
+            DefaultStatusFilter,
+            MaxItemsQuery,
+            IncludeDeliveredQuery,
+            OverdueOnlyQuery,
+            StatusQuery,
+            DueOnOrBeforeQuery);
+
+        ApplyFilters(filters);
+        _groupUiState.SetCollapsedKinds(
+            OrdersBoardGroupUiState.ParseCollapsedGroupsQuery(CollapsedGroupsQuery));
+        var selectedPresetFromQuery = OrdersBoardFilterStateMapper.ParsePreset(PresetQuery);
+        _selectedPreset = ResolveSelectedPreset(filters, selectedPresetFromQuery, DateTime.UtcNow);
+
+        if (!_hasLoaded || _isLoading)
+        {
+            return;
+        }
+
+        if (filterChanged)
+        {
+            await LoadAsync();
+            return;
+        }
+
+        if (presetChanged)
+        {
+            SyncStateToUrl(filters);
+        }
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        _apiBaseUrl = WorkspaceSettings.ApiBaseUrl;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _isLoading = true;
+        _pendingBulkAdvancePlan = null;
+        _pendingRetryGroupKind = null;
+        _pendingDeleteOrderId = null;
+        _errorMessage = null;
+
+        try
+        {
+            var filters = BuildCurrentFilters();
+
+            _selectedPreset = ResolveSelectedPreset(filters, _selectedPreset, DateTime.UtcNow);
+
+            ApplyFilters(filters);
+
+            SyncStateToUrl(filters);
+
+            var normalizedStatus = string.Equals(filters.StatusFilter, OrdersBoardFilterStateMapper.AnyStatus, StringComparison.OrdinalIgnoreCase)
+                ? null
+                : filters.StatusFilter;
+
+            var dueOnOrBeforeUtc = OrdersBoardFilterStateMapper.ToDueOnOrBeforeUtc(filters.DueOnOrBeforeDate);
+
+            var result = await WorklistService.GetAsync(
+                filters.ApiBaseUrl,
+                filters.IncludeDelivered,
+                filters.MaxItems,
+                normalizedStatus,
+                filters.OverdueOnly,
+                dueOnOrBeforeUtc);
+
+            _hasLoaded = true;
+            _lastLoadedAtUtc = DateTimeOffset.UtcNow;
+
+            if (!result.IsSuccess)
+            {
+                _items = [];
+                _groupedItems = [];
+                _groupUiState.SyncToGroups(_groupedItems);
+                _summary = OrdersBoardSummaryBuilder.Empty;
+                _expandedRetryableDetailKinds.Clear();
+                _errorMessage = result.ErrorMessage ?? "Unable to load orders.";
+
+                SyncStateToUrl(filters);
+                return;
+            }
+
+            _items = ApplyClientPresetFilter(result.Items)
+                .OrderBy(item => item.DueAtUtc)
+                .ThenBy(item => item.CustomerName)
+                .ToList();
+
+            _groupedItems = OrdersBoardWorklistOrganizer.BuildGroups(_items, DateTime.UtcNow);
+            _groupUiState.SyncToGroups(_groupedItems);
+            PruneGroupBulkAdvanceStatuses(_groupedItems);
+            PruneExpandedRetryableDetailKinds(_groupedItems);
+            _summary = OrdersBoardSummaryBuilder.Build(_items, DateTime.UtcNow);
+
+            SyncStateToUrl(filters);
+        }
+        finally
+        {
+            _isLoading = false;
+        }
+    }
+
+    private async Task AdvanceStatusAsync(Guid orderId, string targetStatus)
+    {
+        _transitioningOrderId = orderId;
+        _pendingBulkAdvancePlan = null;
+        _pendingRetryGroupKind = null;
+        _pendingPaymentOrderId = null;
+        _pendingDeleteOrderId = null;
+        _actionMessage = null;
+
+        try
+        {
+            var result = await WorklistService.TransitionStatusAsync(_apiBaseUrl, orderId, targetStatus);
+            if (!result.IsSuccess)
+            {
+                _isActionSuccess = false;
+                _actionMessage = result.ErrorMessage ?? "Unable to advance order status.";
+                return;
+            }
+
+            _isActionSuccess = true;
+            _actionMessage = $"Order advanced to {targetStatus}.";
+            await LoadAsync();
+        }
+        finally
+        {
+            _transitioningOrderId = null;
+        }
+    }
+
+    private void PreparePayment(Guid orderId, decimal balanceDue)
+    {
+        _pendingBulkAdvancePlan = null;
+        _pendingRetryGroupKind = null;
+        _openBulkActionsGroupKind = null;
+        _pendingDeleteOrderId = null;
+        _pendingPaymentOrderId = orderId;
+        _paymentAmountDraft = balanceDue > 0m ? balanceDue : null;
+        _paymentNoteDraft = null;
+        _actionMessage = null;
+    }
+
+    private void CancelPayment()
+    {
+        _pendingPaymentOrderId = null;
+        _paymentAmountDraft = null;
+        _paymentNoteDraft = null;
+    }
+
+    private async Task SubmitPaymentAsync(Guid orderId, string customerName, decimal balanceDue)
+    {
+        if (_submittingPaymentOrderId is not null)
+        {
+            return;
+        }
+
+        if (_paymentAmountDraft is null || _paymentAmountDraft <= 0m)
+        {
+            _isActionSuccess = false;
+            _actionMessage = "Payment amount must be greater than zero.";
+            return;
+        }
+
+        if (_paymentAmountDraft > balanceDue)
+        {
+            _isActionSuccess = false;
+            _actionMessage = "Payment cannot exceed the current balance due.";
+            return;
+        }
+
+        _submittingPaymentOrderId = orderId;
+        _pendingBulkAdvancePlan = null;
+        _pendingRetryGroupKind = null;
+        _pendingDeleteOrderId = null;
+        _actionMessage = null;
+
+        try
+        {
+            var result = await WorklistService.AddPaymentAsync(
+                _apiBaseUrl,
+                orderId,
+                _paymentAmountDraft.Value,
+                _paymentNoteDraft);
+
+            if (!result.IsSuccess)
+            {
+                _isActionSuccess = false;
+                _actionMessage = result.ErrorMessage ?? "Unable to save payment.";
+                return;
+            }
+
+            _isActionSuccess = true;
+            _actionMessage = $"Payment recorded for {customerName}.";
+            CancelPayment();
+            await LoadAsync();
+        }
+        finally
+        {
+            _submittingPaymentOrderId = null;
+        }
+    }
+
+    private void PrepareDelete(Guid orderId)
+    {
+        _pendingBulkAdvancePlan = null;
+        _pendingRetryGroupKind = null;
+        _openBulkActionsGroupKind = null;
+        _pendingPaymentOrderId = null;
+        _pendingDeleteOrderId = orderId;
+        _actionMessage = null;
+    }
+
+    private void CancelDelete()
+    {
+        _pendingDeleteOrderId = null;
+    }
+
+    private async Task ConfirmDeleteAsync(Guid orderId, string customerName)
+    {
+        if (_deletingOrderId is not null)
+        {
+            return;
+        }
+
+        _deletingOrderId = orderId;
+        _pendingDeleteOrderId = null;
+        _actionMessage = null;
+
+        try
+        {
+            var result = await WorklistService.DeleteAsync(_apiBaseUrl, orderId);
+            if (!result.IsSuccess)
+            {
+                _isActionSuccess = false;
+                _actionMessage = result.ErrorMessage ?? "Unable to delete order.";
+                return;
+            }
+
+            _isActionSuccess = true;
+            _actionMessage = $"Order for {customerName} was deleted.";
+            await LoadAsync();
+        }
+        finally
+        {
+            _deletingOrderId = null;
+        }
+    }
+
+    private void PrepareGroupBulkAdvance(OrdersBoardBulkAdvancePlan plan)
+    {
+        if (!plan.HasEligible)
+        {
+            _isActionSuccess = false;
+            _actionMessage = $"No eligible orders to advance in {plan.GroupTitle}.";
+            return;
+        }
+
+        _pendingRetryGroupKind = null;
+        _pendingBulkAdvancePlan = plan;
+        _openBulkActionsGroupKind = null;
+        _actionMessage = null;
+    }
+
+    private void CancelGroupBulkAdvance()
+    {
+        _pendingBulkAdvancePlan = null;
+    }
+
+    private void PrepareGroupRetry(OrdersBoardWorklistGroupKind kind)
+    {
+        if (_isBulkAdvancing)
+        {
+            return;
+        }
+
+        if (!_groupBulkAdvanceStatuses.TryGetValue(kind, out var groupStatus))
+        {
+            _isActionSuccess = false;
+            _actionMessage = "No previous failed orders were recorded for this group.";
+            return;
+        }
+
+        var retryCandidates = BuildSafeRetryCandidates(groupStatus);
+        if (retryCandidates.Count == 0)
+        {
+            _pendingRetryGroupKind = null;
+            _isActionSuccess = false;
+            _actionMessage = $"No safe failed orders to retry in {groupStatus.GroupTitle}.";
+            return;
+        }
+
+        _pendingBulkAdvancePlan = null;
+        _pendingRetryGroupKind = kind;
+        _openBulkActionsGroupKind = null;
+        _actionMessage = null;
+    }
+
+    private void CancelGroupRetry()
+    {
+        _pendingRetryGroupKind = null;
+    }
+
+    private async Task ConfirmGroupRetryAsync()
+    {
+        if (_pendingRetryGroupKind is null || _isBulkAdvancing)
+        {
+            return;
+        }
+
+        var kind = _pendingRetryGroupKind.Value;
+        _pendingRetryGroupKind = null;
+
+        await RetryGroupFailedAsync(kind);
+    }
+
+    private async Task ConfirmGroupBulkAdvanceAsync()
+    {
+        if (_pendingBulkAdvancePlan is null || _isBulkAdvancing)
+        {
+            return;
+        }
+
+        var plan = _pendingBulkAdvancePlan;
+        _pendingBulkAdvancePlan = null;
+
+        _isBulkAdvancing = true;
+        _bulkAdvancingGroupKind = plan.GroupKind;
+        _actionMessage = null;
+
+        try
+        {
+            var successCount = 0;
+            var failedCandidates = new List<OrdersBoardBulkAdvanceRetryCandidate>();
+
+            foreach (var candidate in plan.Candidates)
+            {
+                var result = await WorklistService.TransitionStatusAsync(_apiBaseUrl, candidate.OrderId, candidate.TargetStatus);
+                if (result.IsSuccess)
+                {
+                    successCount++;
+                    continue;
+                }
+
+                failedCandidates.Add(new OrdersBoardBulkAdvanceRetryCandidate(
+                    candidate.OrderId,
+                    candidate.CustomerName,
+                    candidate.TargetStatus));
+            }
+
+            var summary = OrdersBoardBulkAdvanceResultBuilder.Build(
+                plan.GroupTitle,
+                successCount,
+                failedCandidates.Count,
+                failedCandidates.Count == 0 ? null : failedCandidates[0].CustomerName);
+
+            var occurredAtUtc = DateTimeOffset.UtcNow;
+
+            _groupBulkAdvanceStatuses[plan.GroupKind] = new GroupBulkAdvanceStatus(
+                plan.GroupTitle,
+                summary,
+                occurredAtUtc,
+                failedCandidates,
+                LastFailedAtUtc: OrdersBoardBulkResultMetaBuilder.ResolveLastFailedAtUtc(
+                    previousLastFailedAtUtc: null,
+                    failedCount: failedCandidates.Count,
+                    occurredAtUtc));
+
+            _isActionSuccess = summary.Outcome == OrdersBoardBulkAdvanceOutcome.Success;
+            _actionMessage = summary.Message;
+
+            await LoadAsync();
+        }
+        finally
+        {
+            _isBulkAdvancing = false;
+            _bulkAdvancingGroupKind = null;
+        }
+    }
+
+    private async Task RetryGroupFailedAsync(OrdersBoardWorklistGroupKind kind)
+    {
+        if (_isBulkAdvancing)
+        {
+            return;
+        }
+
+        if (!_groupBulkAdvanceStatuses.TryGetValue(kind, out var groupStatus))
+        {
+            return;
+        }
+
+        var retryCandidates = BuildSafeRetryCandidates(groupStatus);
+        if (retryCandidates.Count == 0)
+        {
+            _isActionSuccess = false;
+            _actionMessage = $"No safe failed orders to retry in {groupStatus.GroupTitle}.";
+            return;
+        }
+
+        _isBulkAdvancing = true;
+        _bulkAdvancingGroupKind = kind;
+        _pendingBulkAdvancePlan = null;
+        _pendingRetryGroupKind = null;
+        _actionMessage = null;
+
+        try
+        {
+            var successCount = 0;
+            var failedCandidates = new List<OrdersBoardBulkAdvanceRetryCandidate>();
+
+            foreach (var retryCandidate in retryCandidates)
+            {
+                var result = await WorklistService.TransitionStatusAsync(
+                    _apiBaseUrl,
+                    retryCandidate.OrderId,
+                    retryCandidate.TargetStatus);
+
+                if (result.IsSuccess)
+                {
+                    successCount++;
+                    continue;
+                }
+
+                failedCandidates.Add(retryCandidate);
+            }
+
+            var summary = OrdersBoardBulkAdvanceResultBuilder.Build(
+                groupStatus.GroupTitle,
+                successCount,
+                failedCandidates.Count,
+                failedCandidates.Count == 0 ? null : failedCandidates[0].CustomerName,
+                OrdersBoardBulkActionType.Retry);
+
+            var occurredAtUtc = DateTimeOffset.UtcNow;
+
+            _groupBulkAdvanceStatuses[kind] = groupStatus with
+            {
+                Summary = summary,
+                OccurredAtUtc = occurredAtUtc,
+                FailedCandidates = failedCandidates,
+                LastFailedAtUtc = OrdersBoardBulkResultMetaBuilder.ResolveLastFailedAtUtc(
+                    groupStatus.LastFailedAtUtc,
+                    failedCandidates.Count,
+                    occurredAtUtc),
+            };
+
+            _isActionSuccess = summary.Outcome == OrdersBoardBulkAdvanceOutcome.Success;
+            _actionMessage = summary.Message;
+
+            await LoadAsync();
+        }
+        finally
+        {
+            _isBulkAdvancing = false;
+            _bulkAdvancingGroupKind = null;
+        }
+    }
+
+    private async Task ApplyQuickPresetAsync(OrdersBoardQuickPreset preset)
+    {
+        var current = BuildCurrentFilters();
+
+        var presetFilters = OrdersBoardFilterStateMapper.ApplyPreset(current, preset, DateTime.UtcNow);
+        _selectedPreset = preset;
+        ApplyFilters(presetFilters);
+        await LoadAsync();
+    }
+
+    private async Task ResetFiltersAsync()
+    {
+        _selectedPreset = null;
+        ApplyFilters(BuildDefaultFilters());
+        await LoadAsync();
+    }
+
+    private void ApplyFilters(OrdersBoardFilterState filters)
+    {
+        _apiBaseUrl = filters.ApiBaseUrl;
+        _maxItems = filters.MaxItems;
+        _includeDelivered = filters.IncludeDelivered;
+        _overdueOnly = filters.OverdueOnly;
+        _statusFilter = filters.StatusFilter;
+        _dueOnOrBeforeDate = filters.DueOnOrBeforeDate;
+    }
+
+    private IEnumerable<OrderWorklistItemDto> ApplyClientPresetFilter(IEnumerable<OrderWorklistItemDto> items)
+    {
+        return _selectedPreset == OrdersBoardQuickPreset.Unpaid
+            ? items.Where(item => item.BalanceDue > 0m)
+            : items;
+    }
+
+    private void ToggleOrderDensity()
+    {
+        _useCompactOrderCards = !_useCompactOrderCards;
+    }
+
+    private string GetCardsGridClass()
+    {
+        return _useCompactOrderCards
+            ? "cards-grid compact"
+            : "cards-grid comfortable";
+    }
+
+    private string GetOrderCardClass()
+    {
+        return _useCompactOrderCards
+            ? "order-card compact"
+            : "order-card comfortable";
+    }
+
+    private string GetPresetButtonClass(OrdersBoardQuickPreset preset)
+    {
+        var current = BuildCurrentFilters();
+        var nowUtc = DateTime.UtcNow;
+        var selectedPreset = ResolveSelectedPreset(current, _selectedPreset, nowUtc);
+        if (selectedPreset is not null)
+        {
+            return selectedPreset == preset
+                ? "ghost-button active"
+                : "ghost-button";
+        }
+
+        var isActive = OrdersBoardFilterStateMapper.MatchesPreset(current, preset, nowUtc);
+        return isActive
+            ? "ghost-button active"
+            : "ghost-button";
+    }
+
+    private OrdersBoardFilterState BuildCurrentFilters()
+    {
+        return new OrdersBoardFilterState(
+            _apiBaseUrl,
+            _maxItems,
+            _includeDelivered,
+            _overdueOnly,
+            OrdersBoardFilterStateMapper.NormalizeStatus(_statusFilter),
+            _dueOnOrBeforeDate?.Date);
+    }
+
+    private void SyncStateToUrl(OrdersBoardFilterState filters)
+    {
+        var queryParameters = new Dictionary<string, object?>(
+            OrdersBoardFilterStateMapper.ToQueryParameters(filters, BuildDefaultFilters()))
+        {
+            ["collapsedGroups"] = OrdersBoardGroupUiState.BuildCollapsedGroupsQueryValue(
+                _groupUiState.GetCollapsedKinds()),
+            ["preset"] = OrdersBoardFilterStateMapper.ToPresetQueryValue(_selectedPreset),
+        };
+
+        var targetUri = NavigationManager.GetUriWithQueryParameters(
+            queryParameters);
+
+        if (string.Equals(targetUri, NavigationManager.Uri, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        NavigationManager.NavigateTo(targetUri, replace: true);
+    }
+
+    private static OrdersBoardFilterState BuildDefaultFilters()
+    {
+        return new OrdersBoardFilterState(
+            ApiBaseUrl: WorkspaceSettingsService.DefaultApiBaseUrl,
+            MaxItems: DefaultMaxItems,
+            IncludeDelivered: DefaultIncludeDelivered,
+            OverdueOnly: DefaultOverdueOnly,
+            StatusFilter: DefaultStatusFilter,
+            DueOnOrBeforeDate: null);
+    }
+
+    private static string BuildWhatsAppLink(OrderWorklistItemDto item, bool useDueBalanceTemplate)
+    {
+        return WhatsAppPrefillLinkBuilder.BuildFromWorklistItem(item, useDueBalanceTemplate);
+    }
+
+    private string BuildOrderDetailLink(Guid orderId)
+    {
+        return $"/orders/{orderId}";
+    }
+
+    private string BuildCustomerWorkspaceLink(Guid customerId)
+    {
+        return $"/customers?customerId={Uri.EscapeDataString(customerId.ToString())}";
+    }
+
+    private static string BuildGroupWhatsAppLink(OrdersBoardWorklistGroup group, bool useDueBalanceTemplate)
+    {
+        return WhatsAppPrefillLinkBuilder.BuildFromWorklistGroup(group, useDueBalanceTemplate);
+    }
+
+    private static string BuildGroupRetryableWhatsAppLink(
+        OrdersBoardWorklistGroup group,
+        IReadOnlyList<OrdersBoardBulkAdvanceRetryCandidate> retryCandidates)
+    {
+        return WhatsAppPrefillLinkBuilder.BuildFromRetryCandidatesGroup(group.Title, retryCandidates);
+    }
+
+    private static string GetStatusClass(string status)
+    {
+        return status switch
+        {
+            "Delivered" => "status-delivered",
+            "Ready" => "status-ready",
+            "Rework" => "status-rework",
+            "TrialFitting" => "status-trial",
+            "InProgress" => "status-progress",
+            _ => "status-new",
+        };
+    }
+
+    private static bool TryGetNextStatus(string currentStatus, out string? nextStatus)
+    {
+        return OrdersBoardBulkAdvancePlanner.TryGetNextStatus(currentStatus, out nextStatus);
+    }
+
+    private string GetGroupAdvanceButtonText(OrdersBoardBulkAdvancePlan plan)
+    {
+        if (_isBulkAdvancing && _bulkAdvancingGroupKind == plan.GroupKind)
+        {
+            return "Advancing...";
+        }
+
+        return $"Advance ({plan.EligibleCount})";
+    }
+
+    private string GetRetryFailedButtonText(OrdersBoardWorklistGroupKind kind, int retryCount)
+    {
+        if (_isBulkAdvancing && _bulkAdvancingGroupKind == kind)
+        {
+            return "Retrying...";
+        }
+
+        if (_pendingRetryGroupKind == kind)
+        {
+            return "Retry Pending...";
+        }
+
+        return $"Retry Failed ({retryCount})";
+    }
+
+    private string GetConfirmGroupAdvanceText(OrdersBoardBulkAdvancePlan plan)
+    {
+        if (_isBulkAdvancing && _bulkAdvancingGroupKind == plan.GroupKind)
+        {
+            return "Advancing...";
+        }
+
+        return $"Confirm ({plan.EligibleCount})";
+    }
+
+    private string GetConfirmGroupRetryText(OrdersBoardWorklistGroupKind kind, int retryCount)
+    {
+        if (_isBulkAdvancing && _bulkAdvancingGroupKind == kind)
+        {
+            return "Retrying...";
+        }
+
+        return $"Confirm Retry ({retryCount})";
+    }
+
+    private string GetAdvanceButtonText(Guid orderId, string targetStatus)
+    {
+        return _transitioningOrderId == orderId
+            ? "Advancing..."
+            : $"Advance to {targetStatus}";
+    }
+
+    private static string FormatPercent(decimal value)
+    {
+        return $"{value:0.##}%";
+    }
+
+    private static string FormatStatusLabel(string status)
+    {
+        return status switch
+        {
+            "InProgress" => "In Progress",
+            "TrialFitting" => "Trial/Fitting",
+            _ => status,
+        };
+    }
+
+    private static string FormatOrderToken(Guid orderId)
+    {
+        var value = orderId.ToString("N");
+        return $"#{value[..8]}";
+    }
+
+    private static string FormatUtcTimestamp(DateTimeOffset timestamp)
+    {
+        return timestamp.UtcDateTime.ToString("yyyy-MM-dd HH:mm 'UTC'");
+    }
+
+    private GroupBulkAdvanceStatus? GetGroupBulkAdvanceStatus(OrdersBoardWorklistGroupKind kind)
+    {
+        return _groupBulkAdvanceStatuses.TryGetValue(kind, out var status)
+            ? status
+            : null;
+    }
+
+    private IReadOnlyList<OrdersBoardBulkAdvanceRetryCandidate> BuildSafeRetryCandidates(GroupBulkAdvanceStatus? groupStatus)
+    {
+        return OrdersBoardBulkAdvanceRetryPlanner.BuildSafeRetryCandidates(
+            groupStatus?.FailedCandidates,
+            _items);
+    }
+
+    private static string? BuildFailedCustomerInlineText(GroupBulkAdvanceStatus status, int maxItems = 3)
+    {
+        var preview = OrdersBoardBulkFailurePreviewBuilder.Build(status.FailedCandidates, maxItems);
+        if (!preview.HasItems)
+        {
+            return null;
+        }
+
+        var suffix = preview.IsTruncated
+            ? $", and {preview.HiddenCount} more"
+            : string.Empty;
+
+        return $"Failed: {string.Join(", ", preview.Names)}{suffix}";
+    }
+
+    private static string GetGroupBulkResultClass(GroupBulkAdvanceStatus status)
+    {
+        return status.Summary.Outcome switch
+        {
+            OrdersBoardBulkAdvanceOutcome.Success => "success",
+            OrdersBoardBulkAdvanceOutcome.Partial => "partial",
+            _ => "failure",
+        };
+    }
+
+    private static string GetRetryableNowChipClass(int retryableNowCount)
+    {
+        return retryableNowCount > 0
+            ? "warning"
+            : "neutral";
+    }
+
+    private bool IsRetryableDetailsExpanded(OrdersBoardWorklistGroupKind kind)
+    {
+        return _expandedRetryableDetailKinds.Contains(kind);
+    }
+
+    private void ToggleRetryableDetails(OrdersBoardWorklistGroupKind kind)
+    {
+        if (!_expandedRetryableDetailKinds.Add(kind))
+        {
+            _expandedRetryableDetailKinds.Remove(kind);
+        }
+    }
+
+    private static string GetRetryableDetailsToggleText(bool isExpanded, int retryableNowCount)
+    {
+        return isExpanded
+            ? "Hide Retryable"
+            : $"View Retryable ({retryableNowCount})";
+    }
+
+    private string GetDeleteButtonText(Guid orderId)
+    {
+        return _deletingOrderId == orderId
+            ? "Deleting..."
+            : "Delete";
+    }
+
+    private string GetPaymentButtonText(Guid orderId)
+    {
+        return _pendingPaymentOrderId == orderId
+            ? "Payment Open"
+            : "Collect Payment";
+    }
+
+    private string GetSavePaymentText(Guid orderId)
+    {
+        return _submittingPaymentOrderId == orderId
+            ? "Saving..."
+            : "Save Payment";
+    }
+
+    private static string GetDueChipClass(OrderWorklistItemDto item)
+    {
+        var todayUtc = DateTime.UtcNow.Date;
+        var dueDate = item.DueAtUtc.UtcDateTime.Date;
+
+        if (dueDate < todayUtc && item.Status != "Delivered")
+        {
+            return "overdue";
+        }
+
+        if (dueDate == todayUtc)
+        {
+            return "today";
+        }
+
+        return "upcoming";
+    }
+
+    private void PruneGroupBulkAdvanceStatuses(IReadOnlyList<OrdersBoardWorklistGroup> groups)
+    {
+        var activeKinds = groups
+            .Select(group => group.Kind)
+            .ToHashSet();
+
+        var staleKinds = _groupBulkAdvanceStatuses.Keys
+            .Where(kind => !activeKinds.Contains(kind))
+            .ToList();
+
+        foreach (var staleKind in staleKinds)
+        {
+            _groupBulkAdvanceStatuses.Remove(staleKind);
+        }
+    }
+
+    private void PruneExpandedRetryableDetailKinds(IReadOnlyList<OrdersBoardWorklistGroup> groups)
+    {
+        var activeKinds = groups
+            .Select(group => group.Kind)
+            .ToHashSet();
+
+        _expandedRetryableDetailKinds.RemoveWhere(kind =>
+        {
+            if (!activeKinds.Contains(kind))
+            {
+                return true;
+            }
+
+            if (!_groupBulkAdvanceStatuses.TryGetValue(kind, out var status))
+            {
+                return true;
+            }
+
+            var retryableNowCount = BuildSafeRetryCandidates(status).Count;
+            return retryableNowCount <= 3;
+        });
+    }
+
+    private static string GetGroupSectionClass(OrdersBoardWorklistGroupKind kind)
+    {
+        return kind switch
+        {
+            OrdersBoardWorklistGroupKind.New => "group-new",
+            OrdersBoardWorklistGroupKind.InProgress => "group-progress",
+            OrdersBoardWorklistGroupKind.TrialFitting => "group-fitting",
+            OrdersBoardWorklistGroupKind.Rework => "group-rework",
+            OrdersBoardWorklistGroupKind.Ready => "group-ready-balance",
+            OrdersBoardWorklistGroupKind.Delivered => "group-delivered",
+            _ => "group-upcoming",
+        };
+    }
+
+    private bool IsBulkActionsOpen(OrdersBoardWorklistGroupKind kind)
+    {
+        return _openBulkActionsGroupKind == kind;
+    }
+
+    private void ToggleBulkActions(OrdersBoardWorklistGroupKind kind)
+    {
+        _openBulkActionsGroupKind = _openBulkActionsGroupKind == kind
+            ? null
+            : kind;
+    }
+
+    private string GetBulkActionsToggleText(OrdersBoardWorklistGroupKind kind)
+    {
+        return IsBulkActionsOpen(kind)
+            ? "Hide Bulk Actions"
+            : "Bulk Actions";
+    }
+
+    private bool IsGroupCollapsed(OrdersBoardWorklistGroupKind kind)
+    {
+        return _groupUiState.IsCollapsed(kind);
+    }
+
+    private void ToggleGroup(OrdersBoardWorklistGroupKind kind)
+    {
+        _groupUiState.Toggle(kind);
+
+        var filters = BuildCurrentFilters();
+
+        SyncStateToUrl(filters);
+    }
+
+    private static string GetGroupToggleText(bool isCollapsed)
+    {
+        return isCollapsed
+            ? "Expand"
+            : "Collapse";
+    }
+
+    private static OrdersBoardQuickPreset? ResolveSelectedPreset(
+        OrdersBoardFilterState filters,
+        OrdersBoardQuickPreset? selectedPreset,
+        DateTime utcNow)
+    {
+        if (selectedPreset is null)
+        {
+            return null;
+        }
+
+        return OrdersBoardFilterStateMapper.MatchesPreset(filters, selectedPreset.Value, utcNow)
+            ? selectedPreset
+            : null;
+    }
+
+    private sealed record GroupBulkAdvanceStatus(
+        string GroupTitle,
+        OrdersBoardBulkAdvanceResultSummary Summary,
+        DateTimeOffset OccurredAtUtc,
+        IReadOnlyList<OrdersBoardBulkAdvanceRetryCandidate> FailedCandidates,
+        DateTimeOffset? LastFailedAtUtc);
+}
+
+<style>
+    .orders-shell {
+        --ink: #1f2d38;
+        --surface: #f6f7fb;
+        --line: #d6dde6;
+        --accent: #0b6e4f;
+        --accent-soft: #e4f5ee;
+        --danger: #b42318;
+        font-family: "Avenir Next", "Trebuchet MS", sans-serif;
+        color: var(--ink);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 1.2rem;
+        background:
+            radial-gradient(circle at 88% 8%, rgba(11, 110, 79, 0.12), transparent 36%),
+            var(--surface);
+        box-shadow: 0 16px 34px -26px rgba(31, 45, 56, 0.75);
+    }
+
+    .orders-header h1 {
+        margin: 0;
+        font-size: clamp(1.35rem, 2.7vw, 2rem);
+    }
+
+    .orders-header p {
+        margin-top: 0.45rem;
+        color: #3f5160;
+    }
+
+    .filters-grid {
+        margin-top: 1rem;
+        display: grid;
+        gap: 0.85rem;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+
+    label {
+        display: grid;
+        gap: 0.35rem;
+        font-size: 0.9rem;
+        color: #304352;
+    }
+
+    .checkbox-item {
+        align-content: center;
+        grid-auto-flow: column;
+        grid-auto-columns: max-content;
+        justify-content: start;
+        gap: 0.55rem;
+        margin-top: 1.55rem;
+    }
+
+    input,
+    button {
+        font: inherit;
+    }
+
+    input[type="url"],
+    input[type="number"],
+    input[type="date"],
+    select {
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        padding: 0.55rem 0.65rem;
+        background: #fff;
+    }
+
+    input:focus,
+    select:focus {
+        outline: 2px solid rgba(11, 110, 79, 0.2);
+        border-color: var(--accent);
+    }
+
+    .actions-row {
+        margin-top: 0.95rem;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.6rem;
+    }
+
+    .actions-meta {
+        margin-left: auto;
+        display: inline-flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 0.65rem;
+        flex-wrap: wrap;
+    }
+
+    .preset-row {
+        margin-top: 0.85rem;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.6rem;
+    }
+
+    .preset-label {
+        font-size: 0.86rem;
+        color: #4a5e6e;
+        font-weight: 700;
+        letter-spacing: 0.01em;
+    }
+
+    .preset-buttons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+    }
+
+    .meta {
+        color: #445766;
+        font-size: 0.85rem;
+    }
+
+    button {
+        border: none;
+        border-radius: 4px;
+        padding: 0.6rem 0.95rem;
+        background: var(--accent);
+        color: #fff;
+        font-weight: 700;
+        cursor: pointer;
+    }
+
+    button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+    }
+
+    .ghost-button {
+        border: 1px solid #b8cfdd;
+        color: #184967;
+        background: #edf4f9;
+        padding: 0.45rem 0.7rem;
+        font-size: 0.82rem;
+    }
+
+    .ghost-button:hover {
+        background: #e3eef6;
+    }
+
+    .ghost-button.active {
+        border-color: #8bb2c7;
+        background: #d9eaf5;
+        color: #0f3f5d;
+    }
+
+    .error-box,
+    .empty-box {
+        margin-top: 1rem;
+        border-radius: 8px;
+        padding: 0.7rem 0.9rem;
+    }
+
+    .error-box {
+        border: 1px solid #f4c8c1;
+        background: #fff1ef;
+        color: var(--danger);
+    }
+
+    .empty-box {
+        border: 1px solid #cce7d8;
+        background: #f2faf6;
+        color: #1f6b4d;
+    }
+
+    .action-feedback {
+        margin-top: 1rem;
+        border-radius: 8px;
+        padding: 0.65rem 0.85rem;
+        font-size: 0.88rem;
+    }
+
+    .action-feedback.ok {
+        border: 1px solid #b9dec8;
+        background: #eef8f2;
+        color: #1f6b4d;
+    }
+
+    .action-feedback.error {
+        border: 1px solid #f4c8c1;
+        background: #fff1ef;
+        color: var(--danger);
+    }
+
+    .summary-grid {
+        display: grid;
+        gap: 0.75rem;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+
+    .summary-card {
+        border: 1px solid #d7e2ea;
+        border-radius: 8px;
+        background: #fff;
+        padding: 0.7rem 0.8rem;
+    }
+
+    .summary-card h3 {
+        margin: 0;
+        font-size: 0.92rem;
+        color: #345163;
+    }
+
+    .summary-value {
+        margin: 0.4rem 0;
+        font-size: 1.1rem;
+        font-weight: 800;
+        color: #163d58;
+    }
+
+    .summary-meta {
+        margin: 0.25rem 0;
+        font-size: 0.82rem;
+        color: #405c6d;
+    }
+
+    .group-section {
+        margin-top: 1rem;
+    }
+
+    .group-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.6rem;
+        flex-wrap: wrap;
+    }
+
+    .group-heading {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.45rem;
+    }
+
+    .group-header h3 {
+        margin: 0;
+        font-size: 0.95rem;
+        color: #2d4657;
+        letter-spacing: 0.01em;
+    }
+
+    .group-count {
+        display: inline-block;
+        min-width: 1.8rem;
+        text-align: center;
+        border-radius: 999px;
+        padding: 0.2rem 0.48rem;
+        border: 1px solid #c8d8e3;
+        background: #eef5fb;
+        color: #1f4c67;
+        font-size: 0.75rem;
+        font-weight: 800;
+    }
+
+    .group-actions {
+        display: inline-flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+    }
+
+    .group-bulk-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+        margin: 0.65rem 0 0.35rem;
+        padding: 0.6rem;
+        border: 1px dashed #cbd8e2;
+        border-radius: 4px;
+        background: #f8fbfd;
+    }
+
+    .group-action-link {
+        display: inline-flex;
+        align-items: center;
+        text-decoration: none;
+        border: 1px solid #b8cfdd;
+        border-radius: 4px;
+        padding: 0.3rem 0.5rem;
+        color: #184967;
+        background: #edf4f9;
+        font-size: 0.78rem;
+        font-weight: 700;
+    }
+
+    .group-action-link:hover {
+        background: #e3eef6;
+    }
+
+    .group-toggle-button {
+        border: 1px solid #b7d9c9;
+        border-radius: 4px;
+        padding: 0.3rem 0.5rem;
+        color: #0b5b38;
+        background: #f5fbf8;
+        font-size: 0.78rem;
+        font-weight: 700;
+    }
+
+    .group-toggle-button:hover {
+        background: #eaf7f1;
+    }
+
+    .group-bulk-toggle-button {
+        border: 1px solid #cfdbe4;
+        border-radius: 4px;
+        padding: 0.3rem 0.5rem;
+        color: #405465;
+        background: #f6f9fb;
+        font-size: 0.78rem;
+        font-weight: 700;
+    }
+
+    .group-bulk-toggle-button:hover {
+        background: #eef4f8;
+    }
+
+    .group-advance-button {
+        border: 1px solid #eed2a1;
+        border-radius: 4px;
+        padding: 0.3rem 0.5rem;
+        color: #7a4f0c;
+        background: #fff4df;
+        font-size: 0.78rem;
+        font-weight: 700;
+    }
+
+    .group-advance-button:hover {
+        background: #ffedd0;
+    }
+
+    .group-retry-button {
+        border: 1px solid #f0cbbf;
+        border-radius: 4px;
+        padding: 0.3rem 0.5rem;
+        color: #8a3026;
+        background: #fff2ef;
+        font-size: 0.78rem;
+        font-weight: 700;
+    }
+
+    .group-retry-button:hover {
+        background: #ffe9e4;
+    }
+
+    .group-retry-confirm {
+        margin-top: 0.55rem;
+        border: 1px dashed #eabfb7;
+        border-radius: 8px;
+        background: #fff5f3;
+        padding: 0.55rem 0.65rem;
+        font-size: 0.82rem;
+        color: #7e2d23;
+    }
+
+    .group-retry-confirm p {
+        margin: 0;
+    }
+
+    .group-retry-confirm-button {
+        border: 1px solid #dfaaa0;
+        border-radius: 4px;
+        padding: 0.3rem 0.6rem;
+        background: #ffe8e4;
+        color: #7a2d23;
+        font-size: 0.78rem;
+        font-weight: 700;
+    }
+
+    .group-bulk-confirm {
+        margin-top: 0.55rem;
+        border: 1px dashed #e8c78c;
+        border-radius: 8px;
+        background: #fff9ee;
+        padding: 0.55rem 0.65rem;
+        font-size: 0.82rem;
+        color: #6a490e;
+    }
+
+    .group-bulk-confirm p {
+        margin: 0;
+    }
+
+    .group-bulk-result {
+        margin-top: 0.45rem;
+        border: 1px solid #d8e1e8;
+        border-radius: 8px;
+        padding: 0.4rem 0.55rem;
+        font-size: 0.8rem;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.65rem;
+    }
+
+    .group-bulk-result-main {
+        display: grid;
+        gap: 0.2rem;
+        min-width: 0;
+    }
+
+    .group-bulk-failed-meta {
+        font-size: 0.74rem;
+        opacity: 0.95;
+    }
+
+    .group-bulk-result.success {
+        border-color: #b6ddc7;
+        background: #edf8f2;
+        color: #0f623f;
+    }
+
+    .group-bulk-result.partial {
+        border-color: #f1d5ab;
+        background: #fff6e7;
+        color: #7a5312;
+    }
+
+    .group-bulk-result.failure {
+        border-color: #f0c5bf;
+        background: #fff2f0;
+        color: #8d2c24;
+    }
+
+    .group-bulk-result-time {
+        font-size: 0.74rem;
+        white-space: nowrap;
+        opacity: 0.86;
+    }
+
+    .group-bulk-result-meta {
+        display: inline-flex;
+        align-items: center;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 0.35rem;
+    }
+
+    .group-bulk-result-chip {
+        border: 1px solid #d4dce3;
+        border-radius: 999px;
+        padding: 0.12rem 0.42rem;
+        font-size: 0.72rem;
+        font-weight: 700;
+        white-space: nowrap;
+    }
+
+    .group-bulk-result-chip.neutral {
+        border-color: #c9d5de;
+        background: #f0f5f9;
+        color: #375063;
+    }
+
+    .group-bulk-result-chip.warning {
+        border-color: #efcb94;
+        background: #fff2dd;
+        color: #7b4f0d;
+    }
+
+    .group-bulk-result-link {
+        border: 1px solid #d2dae1;
+        border-radius: 999px;
+        padding: 0.1rem 0.45rem;
+        background: #f3f6f9;
+        color: #355064;
+        font-size: 0.72rem;
+        font-weight: 700;
+    }
+
+    .group-bulk-result-link:hover {
+        background: #e8eff5;
+    }
+
+    .group-bulk-retryable-list {
+        margin: 0.35rem 0 0;
+        padding-left: 1.1rem;
+        display: grid;
+        gap: 0.15rem;
+    }
+
+    .group-bulk-retryable-list li {
+        font-size: 0.76rem;
+    }
+
+    .group-bulk-retryable-order {
+        font-family: "Consolas", "Courier New", monospace;
+        font-size: 0.72rem;
+        opacity: 0.82;
+        margin-left: 0.2rem;
+        margin-right: 0.1rem;
+    }
+
+    .group-bulk-retryable-more {
+        margin-top: 0.25rem;
+        font-size: 0.74rem;
+        color: #6f4a0f;
+    }
+
+    .group-bulk-preview-list {
+        margin: 0.45rem 0 0;
+        padding-left: 1.1rem;
+        display: grid;
+        gap: 0.2rem;
+    }
+
+    .group-bulk-distribution {
+        margin-top: 0.45rem;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+    }
+
+    .group-bulk-distribution-item {
+        border: 1px solid #efd6a9;
+        border-radius: 999px;
+        padding: 0.16rem 0.5rem;
+        background: #fff3df;
+        color: #6f4a0f;
+        font-size: 0.74rem;
+        font-weight: 700;
+    }
+
+    .group-bulk-preview-list li {
+        font-size: 0.8rem;
+    }
+
+    .group-bulk-preview-more {
+        margin-top: 0.35rem;
+        font-size: 0.78rem;
+        color: #805710;
+    }
+
+    .group-bulk-confirm-buttons {
+        margin-top: 0.45rem;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+    }
+
+    .group-bulk-confirm-button {
+        border: 1px solid #8ebaa4;
+        border-radius: 4px;
+        padding: 0.3rem 0.6rem;
+        background: #eaf7f1;
+        color: #0d593a;
+        font-size: 0.78rem;
+        font-weight: 700;
+    }
+
+    .group-bulk-cancel-button {
+        border: 1px solid #d1dae1;
+        border-radius: 4px;
+        padding: 0.3rem 0.6rem;
+        background: #f3f6f9;
+        color: #405465;
+        font-size: 0.78rem;
+        font-weight: 700;
+    }
+
+    .group-new .group-count {
+        border-color: #c7d8e5;
+        background: #eef5fb;
+        color: #224f72;
+    }
+
+    .group-progress .group-count {
+        border-color: #b7cdeb;
+        background: #eaf2ff;
+        color: #1554a3;
+    }
+
+    .group-fitting .group-count {
+        border-color: #efcf9d;
+        background: #fff3de;
+        color: #8f5a0a;
+    }
+
+    .group-rework .group-count,
+    .group-overdue .group-count {
+        border-color: #efb4b4;
+        background: #ffe8e8;
+        color: #8f2d2d;
+    }
+
+    .group-due-today .group-count {
+        border-color: #efcf9d;
+        background: #fff3de;
+        color: #8f5a0a;
+    }
+
+    .group-ready-balance .group-count {
+        border-color: #b8dec8;
+        background: #ecf8f1;
+        color: #1a6d4a;
+    }
+
+    .group-delivered .group-count {
+        border-color: #ccd4db;
+        background: #f0f3f6;
+        color: #4a5b69;
+    }
+
+    .group-section .cards-grid {
+        margin-top: 0.6rem;
+    }
+
+    .cards-grid {
+        margin-top: 1rem;
+        display: grid;
+        gap: 0.85rem;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    }
+
+    .cards-grid.compact {
+        gap: 0.65rem;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    }
+
+    .order-card {
+        border: 1px solid #d7e2ea;
+        border-radius: 8px;
+        padding: 0.95rem;
+        background: linear-gradient(180deg, #ffffff, #fbfdff);
+        box-shadow: 0 20px 38px -34px rgba(19, 36, 48, 0.45);
+    }
+
+    .order-card.compact {
+        padding: 0.72rem;
+    }
+
+    .order-card.compact .order-facts {
+        gap: 0.42rem;
+        margin-top: 0.65rem;
+    }
+
+    .order-card.compact .order-facts div {
+        padding-top: 0.34rem;
+    }
+
+    .order-card.compact .card-summary-band {
+        margin-top: 0.55rem;
+    }
+
+    .order-card header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 0.75rem;
+    }
+
+    .order-card h2 {
+        margin: 0;
+        font-size: 1.05rem;
+    }
+
+    .card-heading {
+        display: grid;
+        gap: 0.2rem;
+    }
+
+    .card-subtitle {
+        margin: 0;
+        color: #547084;
+        font-size: 0.84rem;
+        font-weight: 700;
+    }
+
+    .card-summary-band {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+        margin-top: 0.8rem;
+    }
+
+    .summary-chip {
+        border: 1px solid #d1d9e1;
+        border-radius: 999px;
+        padding: 0.2rem 0.55rem;
+        background: #f4f7fa;
+        color: #355064;
+        font-size: 0.76rem;
+        font-weight: 800;
+    }
+
+    .summary-chip.overdue {
+        border-color: #efb7b1;
+        background: #fff0ee;
+        color: #922f27;
+    }
+
+    .summary-chip.today {
+        border-color: #efcf9d;
+        background: #fff3de;
+        color: #8f5a0a;
+    }
+
+    .summary-chip.upcoming {
+        border-color: #c7d8e5;
+        background: #eef5fb;
+        color: #224f72;
+    }
+
+    .summary-chip.money {
+        border-color: #b9dec8;
+        background: #edf8f2;
+        color: #14613e;
+    }
+
+    .summary-chip.settled {
+        border-color: #cfd7de;
+        background: #f4f6f8;
+        color: #546372;
+    }
+
+    .order-facts {
+        margin: 0.85rem 0 0;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.6rem;
+    }
+
+    .order-facts div {
+        border-top: 1px solid #edf1f5;
+        padding-top: 0.45rem;
+    }
+
+    .order-facts dt {
+        margin: 0;
+        color: #607487;
+        font-size: 0.73rem;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+    }
+
+    .order-facts dd {
+        margin: 0.2rem 0 0;
+        color: #223846;
+        font-size: 0.88rem;
+        font-weight: 700;
+        word-break: break-word;
+    }
+
+    .status-pill {
+        display: inline-block;
+        border-radius: 999px;
+        padding: 0.2rem 0.55rem;
+        font-size: 0.76rem;
+        font-weight: 700;
+    }
+
+    .status-new { background: #eef4fb; color: #284c7a; }
+    .status-progress { background: #e6f0fb; color: #1554a3; }
+    .status-trial { background: #fff6e6; color: #935d06; }
+    .status-rework { background: #ffeceb; color: #a1322a; }
+    .status-ready { background: #e7f6ed; color: #0b6e4f; }
+    .status-delivered { background: #ebedf0; color: #4a5563; }
+
+    .card-actions {
+        margin-top: 0.65rem;
+        display: grid;
+        gap: 0.55rem;
+    }
+
+    .card-action-group {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.45rem;
+    }
+
+    .card-action-group.money-actions,
+    .card-action-group.danger-actions {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .danger-actions {
+        padding-top: 0.55rem;
+        border-top: 1px solid #f2d7d3;
+    }
+
+    .status-action-panel {
+        margin-top: 0.8rem;
+        border: 1px solid #b7d9c9;
+        border-radius: 8px;
+        padding: 0.6rem;
+        background: linear-gradient(180deg, #f3fbf7, #ffffff);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.65rem;
+    }
+
+    .status-action-copy {
+        color: #2f5667;
+        font-size: 0.78rem;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+    }
+
+    .status-primary-button {
+        border: 1px solid #0b6e4f;
+        border-radius: 4px;
+        min-height: 2.35rem;
+        padding: 0.45rem 0.75rem;
+        color: #ffffff;
+        background: #0b6e4f;
+        font-size: 0.84rem;
+        font-weight: 800;
+        white-space: nowrap;
+        box-shadow: 0 12px 22px -18px rgba(11, 110, 79, 0.95);
+    }
+
+    .status-primary-button:hover {
+        background: #075f44;
+    }
+
+    .action-button {
+        border: 1px solid #b2cad8;
+        border-radius: 4px;
+        padding: 0.35rem 0.55rem;
+        color: #114365;
+        background: #eef5fb;
+        font-weight: 700;
+        font-size: 0.82rem;
+    }
+
+    .action-button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+    }
+
+    .action-link {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        text-decoration: none;
+        border: 1px solid #b7d9c9;
+        border-radius: 4px;
+        padding: 0.35rem 0.55rem;
+        color: #0b5b38;
+        background: #f5fbf8;
+        font-weight: 700;
+        font-size: 0.82rem;
+        min-height: 2.35rem;
+    }
+
+    .action-link:hover {
+        background: var(--accent-soft);
+    }
+
+    .action-link.neutral {
+        border-color: #c7d5df;
+        color: #28475c;
+        background: #f2f6f9;
+    }
+
+    .action-link.neutral:hover {
+        background: #e9f0f5;
+    }
+
+    .payment-button {
+        border: 1px solid #c9d7a7;
+        border-radius: 4px;
+        padding: 0.35rem 0.55rem;
+        color: #576d12;
+        background: #f7fbe8;
+        font-weight: 700;
+        font-size: 0.82rem;
+        min-height: 2.35rem;
+    }
+
+    .payment-button:hover {
+        background: #f1f7da;
+    }
+
+    .delete-button {
+        border: 1px solid #efc0bb;
+        border-radius: 4px;
+        padding: 0.35rem 0.55rem;
+        color: #8d2c24;
+        background: #fff1ef;
+        font-weight: 700;
+        font-size: 0.82rem;
+        min-height: 2.35rem;
+    }
+
+    .delete-button:hover {
+        background: #ffe6e1;
+    }
+
+    .card-payment-panel {
+        margin-top: 0.7rem;
+        border: 1px dashed #c8d7a2;
+        border-radius: 8px;
+        background: #fbfdf3;
+        padding: 0.7rem 0.8rem;
+        color: #4c5f13;
+    }
+
+    .card-payment-panel p {
+        margin: 0;
+        font-size: 0.82rem;
+    }
+
+    .card-payment-grid {
+        margin-top: 0.55rem;
+        display: grid;
+        gap: 0.55rem;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    }
+
+    .card-payment-grid label {
+        margin: 0;
+        gap: 0.3rem;
+    }
+
+    .card-payment-grid input {
+        border: 1px solid #cfd7b6;
+        border-radius: 4px;
+        padding: 0.5rem 0.65rem;
+        background: #fff;
+    }
+
+    .card-payment-buttons {
+        margin-top: 0.55rem;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+    }
+
+    .card-payment-confirm-button {
+        border: 1px solid #b8cf88;
+        border-radius: 4px;
+        padding: 0.3rem 0.65rem;
+        background: #eef7d9;
+        color: #4f6510;
+        font-size: 0.78rem;
+        font-weight: 700;
+    }
+
+    .card-payment-cancel-button {
+        border: 1px solid #d1dae1;
+        border-radius: 4px;
+        padding: 0.3rem 0.65rem;
+        background: #f3f6f9;
+        color: #405465;
+        font-size: 0.78rem;
+        font-weight: 700;
+    }
+
+    .card-delete-confirm {
+        margin-top: 0.65rem;
+        border: 1px dashed #efc0bb;
+        border-radius: 4px;
+        background: #fff6f4;
+        padding: 0.55rem 0.65rem;
+        font-size: 0.81rem;
+        color: #7c2d25;
+    }
+
+    .card-delete-confirm p {
+        margin: 0;
+    }
+
+    .card-delete-confirm-buttons {
+        margin-top: 0.45rem;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+    }
+
+    .card-delete-confirm-button {
+        border: 1px solid #dfaaa0;
+        border-radius: 4px;
+        padding: 0.3rem 0.6rem;
+        background: #ffe8e4;
+        color: #7a2d23;
+        font-size: 0.78rem;
+        font-weight: 700;
+    }
+
+    .card-delete-cancel-button {
+        border: 1px solid #d1dae1;
+        border-radius: 4px;
+        padding: 0.3rem 0.6rem;
+        background: #f3f6f9;
+        color: #405465;
+        font-size: 0.78rem;
+        font-weight: 700;
+    }
+
+    .complete-pill {
+        display: inline-block;
+        border: 1px solid #d8dee4;
+        border-radius: 999px;
+        padding: 0.25rem 0.5rem;
+        color: #4a5b69;
+        background: #f3f6f9;
+        font-weight: 700;
+        font-size: 0.78rem;
+    }
+
+    .whatsapp-glyph {
+        display: inline-grid;
+        place-items: center;
+        width: 1rem;
+        height: 1rem;
+        margin-right: 0.35rem;
+        border-radius: 999px;
+        background: #25d366;
+        vertical-align: -0.12rem;
+    }
+
+    .whatsapp-glyph::before {
+        content: "";
+        width: 0.42rem;
+        height: 0.42rem;
+        border: 2px solid #ffffff;
+        border-top-color: transparent;
+        border-left-color: transparent;
+        border-radius: 2px;
+        transform: rotate(-35deg);
+    }
+
+    @@media (max-width: 760px) {
+        .orders-shell {
+            padding: 0.95rem;
+        }
+
+        .actions-row {
+            flex-direction: column;
+            align-items: stretch;
+        }
+
+        .actions-meta {
+            margin-left: 0;
+            justify-content: space-between;
+        }
+
+        .preset-row {
+            flex-direction: column;
+            align-items: stretch;
+        }
+
+        .preset-buttons button {
+            width: 100%;
+        }
+
+        .order-facts {
+            grid-template-columns: 1fr;
+        }
+    }
+</style>

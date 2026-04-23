@@ -1,0 +1,21 @@
+# Build artifacts
+**/bin/
+**/obj/
+
+# Rider / VS / VS Code
+.vs/
+.idea/
+.vscode/
+
+# Test artifacts
+**/TestResults/
+*.trx
+
+# Local databases
+*.db
+*.db-shm
+*.db-wal
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,2385 @@
+@page "/customers"
+@using System.Globalization
+@using System.Text.Json
+@using Microsoft.AspNetCore.Components
+@using Microsoft.AspNetCore.Components.Web
+@using Microsoft.JSInterop
+@using STailor.Shared.Contracts.Customers
+@using STailor.Shared.Contracts.Measurements
+@using STailor.Shared.Contracts.Orders
+@using STailor.UI.Rcl.Services
+@inject CustomerWorkspaceService CustomerWorkspaceService
+@inject OrderWorklistService OrderWorklistService
+@inject WorkspaceSettingsService WorkspaceSettings
+@inject IJSRuntime JsRuntime
+
+<section class="customers-shell">
+    <header class="customers-header">
+        <div class="header-copy">
+            <p class="eyebrow">Customer Operations</p>
+            <h1>Customer History</h1>
+            <p>Find returning customers, review saved measurements, check recent orders, and safely remove inactive records.</p>
+        </div>
+        <a class="primary-link" href="/orders/new">Start New Order</a>
+    </header>
+
+    <section class="toolbar-card">
+        <div class="toolbar-grid">
+            <label>
+                Search
+                <input type="search" @bind="_searchText" @onkeydown="HandleSearchKeyDown" placeholder="Name, phone, or city" />
+            </label>
+            <label>
+                Max Items
+                <input type="number" min="1" max="100" @bind="_maxItems" @onkeydown="HandleSearchKeyDown" />
+            </label>
+        </div>
+
+        <div class="toolbar-actions">
+            <button type="button" @onclick="LoadCustomersAsync" disabled="@_isLoadingList">Load Customers</button>
+            <button type="button" class="ghost" @onclick="ClearSearch" disabled="@_isLoadingList">Reset Search</button>
+        </div>
+
+        <div class="customer-filter-row" aria-label="Customer quick filters">
+            <span>Quick filters</span>
+            <button type="button" class="@GetCustomerQuickFilterClass(CustomerQuickFilter.Balance)" @onclick="() => SetCustomerQuickFilter(CustomerQuickFilter.Balance)">Balance</button>
+            <button type="button" class="@GetCustomerQuickFilterClass(CustomerQuickFilter.Recent)" @onclick="() => SetCustomerQuickFilter(CustomerQuickFilter.Recent)">Recent</button>
+            <button type="button" class="@GetCustomerQuickFilterClass(CustomerQuickFilter.NoOrders)" @onclick="() => SetCustomerQuickFilter(CustomerQuickFilter.NoOrders)">No Orders</button>
+            <button type="button" class="@GetCustomerQuickFilterClass(CustomerQuickFilter.Frequent)" @onclick="() => SetCustomerQuickFilter(CustomerQuickFilter.Frequent)">Frequent Customers</button>
+            <button type="button" class="@GetCustomerQuickFilterClass(CustomerQuickFilter.All)" @onclick="() => SetCustomerQuickFilter(CustomerQuickFilter.All)">All</button>
+        </div>
+
+        @if (!string.IsNullOrWhiteSpace(_feedbackMessage))
+        {
+            <p class="@GetFeedbackClass()">@_feedbackMessage</p>
+        }
+    </section>
+
+    <div class="workspace-grid">
+        <section class="list-card">
+            <header class="section-header">
+                <h2>Customers</h2>
+                <div class="section-header-actions">
+                    <span>@GetVisibleCustomers().Count loaded</span>
+                    <button
+                        type="button"
+                        class="ghost compact-action"
+                        @onclick="ToggleCustomerDensity">
+                        @(_useCompactCustomerCards ? "Comfortable" : "Compact")
+                    </button>
+                </div>
+            </header>
+
+            @if (_isLoadingList)
+            {
+                <p>Loading customers...</p>
+            }
+            else if (GetVisibleCustomers().Count == 0)
+            {
+                <p class="muted">No customers match the current search.</p>
+            }
+            else
+            {
+                <div class="@GetCustomerListClass()">
+                    @foreach (var customer in GetVisibleCustomers())
+                    {
+                        var isSelected = _selectedCustomerId == customer.CustomerId;
+                        <button
+                            type="button"
+                            class="@GetCustomerCardClass(isSelected)"
+                            @onclick="() => SelectCustomerAsync(customer.CustomerId)">
+                            <div class="customer-card-topline">
+                                <div class="customer-identity">
+                                    <strong>@customer.FullName</strong>
+                                    <span>@customer.City</span>
+                                </div>
+                                <span class="@GetBalanceChipClass(customer.OutstandingBalance)">
+                                    @(customer.OutstandingBalance > 0m ? $"Due {FormatMoney(customer.OutstandingBalance)}" : "Paid")
+                                </span>
+                            </div>
+                            <div class="customer-card-meta">
+                                <span>@customer.PhoneNumber</span>
+                                <span>@customer.OrderCount order(s)</span>
+                                <span>@FormatLastOrder(customer.LastOrderReceivedAtUtc)</span>
+                            </div>
+                            @if (!_useCompactCustomerCards && !string.IsNullOrWhiteSpace(customer.Notes))
+                            {
+                                <p class="customer-note">@customer.Notes</p>
+                            }
+                        </button>
+                    }
+                </div>
+            }
+        </section>
+
+        <section class="detail-card">
+            <header class="section-header">
+                <div class="detail-header-title">
+                    <h2>Customer Detail</h2>
+                    @if (_detail?.Customer is not null)
+                    {
+                        <div class="detail-header-chips">
+                            <span class="@GetBalanceChipClass(_detail.Customer.OutstandingBalance)">Balance Due @FormatMoney(_detail.Customer.OutstandingBalance)</span>
+                            <span>@GetLastOrderStatusText(_detail.Customer)</span>
+                        </div>
+                    }
+                </div>
+                @if (_detail?.Customer is not null)
+                {
+                    <div class="section-header-actions">
+                        <span>Updated @_detail.Customer.UpdatedAtUtc.ToString("yyyy-MM-dd")</span>
+                        <button
+                            type="button"
+                            class="ghost compact-action"
+                            @onclick="OpenCustomerEdit">
+                            Edit
+                        </button>
+                        <button
+                            type="button"
+                            class="ghost compact-action"
+                            @onclick="OpenCustomerHistoryAsync"
+                            disabled="@_isLoadingHistory">
+                            @(_isLoadingHistory ? "Loading..." : "View History")
+                        </button>
+                        <button
+                            type="button"
+                            class="ghost compact-action"
+                            @onclick="PrintCustomerStatementAsync">
+                            Print
+                        </button>
+                    </div>
+                }
+            </header>
+
+            @if (_isLoadingDetail)
+            {
+                <p>Loading customer detail...</p>
+            }
+            else if (_detail?.Customer is null)
+            {
+                <p class="muted">Choose a customer to view saved measurements and recent orders.</p>
+            }
+            else
+            {
+                var customer = _detail.Customer;
+                <div class="detail-top">
+                    <div>
+                        <h3>@customer.FullName</h3>
+                        <p class="customer-since">Customer since @FormatDate(customer.CreatedAtUtc)</p>
+                        <p>@customer.PhoneNumber</p>
+                        <p>@customer.City</p>
+                        @if (!string.IsNullOrWhiteSpace(customer.Notes))
+                        {
+                            <details class="customer-notes">
+                                <summary>Notes</summary>
+                                <p>@customer.Notes</p>
+                            </details>
+                        }
+                    </div>
+
+                    <div class="detail-stats">
+                        <div>
+                            <span class="stat-label">Outstanding Balance</span>
+                            <strong>@customer.OutstandingBalance</strong>
+                        </div>
+                        <div>
+                            <span class="stat-label">Recent Orders</span>
+                            <strong>@customer.RecentOrders.Count</strong>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="detail-actions">
+                    <a class="secondary-link" href="@BuildOrderPrefillLink(customer)">Start New Order</a>
+                    @if (_confirmDeleteCustomerId == customer.CustomerId)
+                    {
+                        <button type="button" class="danger" @onclick="ConfirmDeleteSelectedAsync" disabled="@_isDeleting">@(_isDeleting ? "Deleting..." : "Confirm Delete")</button>
+                        <button type="button" class="ghost" @onclick="CancelDelete" disabled="@_isDeleting">Cancel</button>
+                    }
+                    else
+                    {
+                        <button type="button" class="danger" @onclick="@(() => ArmDelete(customer.CustomerId))" disabled="@_isDeleting">@(_isDeleting ? "Deleting..." : "Delete Customer")</button>
+                    }
+                </div>
+
+                @if (_confirmDeleteCustomerId == customer.CustomerId)
+                {
+                    <p class="delete-warning">Delete is blocked automatically when orders still exist for this customer.</p>
+                }
+
+                <div class="detail-sections">
+                    <section class="nested-card">
+                        <h3>Saved Measurements</h3>
+                        <p class="muted">
+                            Keep reusable customer measurements here. Each order still keeps its own saved copy from intake.
+                        </p>
+
+                        <div class="measurement-editor-toolbar">
+                            <label>
+                                Garment Type
+                                <select value="@_measurementGarmentType" @onchange="OnMeasurementGarmentTypeChanged">
+                                    @foreach (var garmentType in GetMeasurementGarmentOptions())
+                                    {
+                                        <option value="@garmentType">@garmentType</option>
+                                    }
+                                </select>
+                            </label>
+                            <div class="measurement-editor-actions">
+                                <button type="button" @onclick="SaveMeasurementsAsync" disabled="@_isSavingMeasurements">
+                                    @(_isSavingMeasurements ? "Saving Measurements..." : "Save Measurements")
+                                </button>
+                            </div>
+                        </div>
+
+                        @if (GetSavedMeasurementSetCount(customer.BaselineMeasurementsJson) > 0)
+                        {
+                            <div class="measurement-set-list">
+                                @foreach (var garmentType in GetSavedMeasurementSets(customer.BaselineMeasurementsJson))
+                                {
+                                    <button
+                                        type="button"
+                                        class="measurement-set-chip @(string.Equals(garmentType, _measurementGarmentType, StringComparison.OrdinalIgnoreCase) ? "selected" : string.Empty)"
+                                        @onclick="() => SelectMeasurementGarment(garmentType)">
+                                        @garmentType
+                                    </button>
+                                }
+                            </div>
+                        }
+
+                        <div class="measurement-editor-list" role="table" aria-label="Saved measurement rows">
+                            <div class="measurement-editor-row measurement-editor-head" role="row">
+                                <span role="columnheader">Name</span>
+                                <span role="columnheader">Value</span>
+                                <span role="columnheader">Action</span>
+                            </div>
+
+                            @foreach (var row in _measurementDraftRows)
+                            {
+                                <div class="measurement-editor-row" role="row">
+                                    <input
+                                        role="cell"
+                                        type="text"
+                                        value="@row.Name"
+                                        @oninput="eventArgs => UpdateMeasurementName(row.Id, eventArgs.Value?.ToString())"
+                                        placeholder="Chest, Sleeve, Waist"
+                                        aria-label="Measurement name" />
+                                    <input
+                                        role="cell"
+                                        type="text"
+                                        inputmode="decimal"
+                                        value="@row.ValueText"
+                                        placeholder="40, 3/2, 1-3/2"
+                                        @oninput="eventArgs => UpdateMeasurementValue(row.Id, eventArgs.Value?.ToString())"
+                                        aria-label="Measurement value" />
+                                    <button type="button" class="ghost remove-measurement-button" @onclick="() => RemoveMeasurementRow(row.Id)">
+                                        Remove
+                                    </button>
+                                </div>
+                            }
+                            <button type="button" class="add-row-button" title="Add measurement" aria-label="Add measurement" @onclick="AddMeasurementRow">+</button>
+                        </div>
+                    </section>
+
+                    <section class="nested-card">
+                        <h3>Recent Orders</h3>
+                        @if (customer.RecentOrders.Count == 0)
+                        {
+                            <p class="muted">No orders found for this customer yet.</p>
+                        }
+                        else
+                        {
+                            <div class="recent-orders">
+                                @foreach (var order in customer.RecentOrders)
+                                {
+                                    <article class="order-card">
+                                        <div class="order-card-header">
+                                            <strong>@order.GarmentType</strong>
+                                            <span>@FormatStatus(order.Status)</span>
+                                        </div>
+                                        <div class="order-card-meta">
+                                            <span>Received @order.ReceivedAtUtc.ToString("yyyy-MM-dd")</span>
+                                            <span>Due @order.DueAtUtc.ToString("yyyy-MM-dd")</span>
+                                            <span>Balance @order.BalanceDue</span>
+                                        </div>
+                                        <div class="order-card-actions">
+                                            <a class="secondary-link" href="@BuildOrderDetailLink(order.OrderId)">Open Order</a>
+                                        </div>
+                                        @if (TryReadMeasurements(order.MeasurementSnapshotJson, out var snapshotMeasurements) && snapshotMeasurements.Count > 0)
+                                        {
+                                        <details>
+                                                <summary>Measurements saved with this order</summary>
+                                                <dl class="measurement-list compact">
+                                                    @foreach (var measurement in snapshotMeasurements)
+                                                    {
+                                                        <div>
+                                                            <dt>@measurement.Key</dt>
+                                                            <dd>@measurement.Value</dd>
+                                                        </div>
+                                                    }
+                                                </dl>
+                                            </details>
+                                        }
+                                        @{
+                                            var nextStatus = GetNextStatus(order.Status);
+                                        }
+                                        @if (nextStatus is not null)
+                                        {
+                                            <div class="order-card-actions status-card-actions">
+                                                <button
+                                                    type="button"
+                                                    class="ghost status-action-button"
+                                                    @onclick="@(() => AdvanceStatusAsync(order))"
+                                                    disabled="@_isTransitioningStatus">
+                                                    @(_isTransitioningStatus && _activeTransitionOrderId == order.OrderId
+                                                        ? "Advancing..."
+                                                        : $"Advance to {FormatStatus(nextStatus)}")
+                                                </button>
+                                            </div>
+                                        }
+                                        else
+                                        {
+                                            <p class="muted order-complete">Lifecycle complete.</p>
+                                        }
+                                        @if (order.BalanceDue > 0m)
+                                        {
+                                            <div class="order-card-actions">
+                                                @if (_activePaymentOrderId == order.OrderId)
+                                                {
+                                                    <div class="payment-panel">
+                                                        <label>
+                                                            Payment Amount
+                                                            <input type="number" min="0.01" max="@order.BalanceDue" step="0.01" @bind="_paymentAmount" />
+                                                        </label>
+                                                        <label>
+                                                            Note (Optional)
+                                                            <input type="text" @bind="_paymentNote" placeholder="Cash, transfer, reminder visit" />
+                                                        </label>
+                                                        <div class="payment-actions">
+                                                            <button type="button" @onclick="@(() => SubmitPaymentAsync(order))" disabled="@_isSubmittingPayment">
+                                                                @(_isSubmittingPayment ? "Saving Payment..." : "Save Payment")
+                                                            </button>
+                                                            <button type="button" class="ghost" @onclick="CancelPayment" disabled="@_isSubmittingPayment">Cancel</button>
+                                                        </div>
+                                                    </div>
+                                                }
+                                                else
+                                                {
+                                                    <button type="button" class="ghost" @onclick="@(() => ArmPayment(order))">Collect Payment</button>
+                                                }
+                                            </div>
+                                        }
+                                    </article>
+                                }
+                            </div>
+                        }
+                    </section>
+                </div>
+            }
+        </section>
+    </div>
+</section>
+
+@if (_detail?.Customer is not null)
+{
+    var statementCustomer = _detail.Customer;
+    <section class="customer-statement-print" aria-label="Printed customer statement">
+        <header class="statement-header">
+            @if (!string.IsNullOrWhiteSpace(WorkspaceSettings.LogoDataUrl))
+            {
+                <img src="@WorkspaceSettings.LogoDataUrl" alt="@WorkspaceSettings.ProductName logo" />
+            }
+            <div>
+                <h1>@WorkspaceSettings.ProductName</h1>
+                @if (!string.IsNullOrWhiteSpace(WorkspaceSettings.ShopAddress))
+                {
+                    <p>@WorkspaceSettings.ShopAddress</p>
+                }
+                <p>
+                    @if (!string.IsNullOrWhiteSpace(WorkspaceSettings.ShopPhoneNumber))
+                    {
+                        <span>Phone: @WorkspaceSettings.ShopPhoneNumber</span>
+                    }
+                    @if (!string.IsNullOrWhiteSpace(WorkspaceSettings.NationalTaxNumber))
+                    {
+                        <span>NTN: @WorkspaceSettings.NationalTaxNumber</span>
+                    }
+                    @if (!string.IsNullOrWhiteSpace(WorkspaceSettings.SalesTaxRegistrationNumber))
+                    {
+                        <span>STRN: @WorkspaceSettings.SalesTaxRegistrationNumber</span>
+                    }
+                </p>
+            </div>
+            <div class="statement-meta">
+                <strong>Customer Statement</strong>
+                <span>Date: @DateTime.Now.ToString("yyyy-MM-dd HH:mm")</span>
+            </div>
+        </header>
+
+        <section class="statement-cards">
+            <article><span>Customer</span><strong>@statementCustomer.FullName</strong></article>
+            <article><span>Phone</span><strong>@statementCustomer.PhoneNumber</strong></article>
+            <article><span>Customer Since</span><strong>@FormatDate(statementCustomer.CreatedAtUtc)</strong></article>
+            <article><span>Balance Due</span><strong>@FormatMoney(statementCustomer.OutstandingBalance)</strong></article>
+        </section>
+
+        <table class="statement-table">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Order</th>
+                    <th>Garment</th>
+                    <th>Status</th>
+                    <th>Received</th>
+                    <th>Due</th>
+                    <th>Charged</th>
+                    <th>Paid</th>
+                    <th>Balance</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var row in statementCustomer.RecentOrders.Select((order, index) => new { order, index }))
+                {
+                    <tr>
+                        <td>@(row.index + 1)</td>
+                        <td>@FormatOrderToken(row.order.OrderId)</td>
+                        <td>@row.order.GarmentType</td>
+                        <td>@FormatStatus(row.order.Status)</td>
+                        <td>@FormatDate(row.order.ReceivedAtUtc)</td>
+                        <td>@FormatDate(row.order.DueAtUtc)</td>
+                        <td>@FormatMoney(row.order.AmountCharged)</td>
+                        <td>@FormatMoney(row.order.AmountPaid)</td>
+                        <td>@FormatMoney(row.order.BalanceDue)</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </section>
+}
+
+@if (_isEditModalOpen && _detail?.Customer is not null)
+{
+    <div class="history-modal-backdrop" role="presentation" @onclick="CloseCustomerEdit">
+        <section class="history-modal customer-edit-modal" role="dialog" aria-modal="true" aria-labelledby="customer-edit-title" @onclick:stopPropagation="true">
+            <header class="history-modal-header">
+                <div>
+                    <p class="eyebrow">Edit Customer</p>
+                    <h2 id="customer-edit-title">@_detail.Customer.FullName</h2>
+                    <p>Update the customer's contact information without changing saved measurements or order history.</p>
+                </div>
+                <button type="button" class="ghost compact-action" @onclick="CloseCustomerEdit" disabled="@_isSavingCustomerEdit">Close</button>
+            </header>
+
+            <div class="customer-edit-form">
+                <label>
+                    Name
+                    <input type="text" @bind="_editFullName" placeholder="Customer full name" />
+                </label>
+                <label>
+                    Phone
+                    <input type="tel" @bind="_editPhoneNumber" placeholder="+923001234567" />
+                </label>
+                <label>
+                    City
+                    <input type="text" @bind="_editCity" placeholder="City" />
+                </label>
+                <label>
+                    Notes
+                    <textarea @bind="_editNotes" placeholder="Optional customer notes"></textarea>
+                </label>
+            </div>
+
+            @if (!string.IsNullOrWhiteSpace(_editError))
+            {
+                <p class="feedback error">@_editError</p>
+            }
+
+            <div class="modal-actions">
+                <button type="button" @onclick="SaveCustomerEditAsync" disabled="@_isSavingCustomerEdit">
+                    @(_isSavingCustomerEdit ? "Saving..." : "Save Customer")
+                </button>
+                <button type="button" class="ghost" @onclick="CloseCustomerEdit" disabled="@_isSavingCustomerEdit">Cancel</button>
+            </div>
+        </section>
+    </div>
+}
+
+@if (_isHistoryModalOpen && _detail?.Customer is not null)
+{
+    <div class="history-modal-backdrop" role="presentation" @onclick="CloseCustomerHistory">
+        <section class="history-modal" role="dialog" aria-modal="true" aria-labelledby="customer-history-title" @onclick:stopPropagation="true">
+            <header class="history-modal-header">
+                <div>
+                    <p class="eyebrow">Customer Timeline</p>
+                    <h2 id="customer-history-title">@_detail.Customer.FullName</h2>
+                    <p>Orders, payments, and fitting dates in one clean history.</p>
+                </div>
+                <button type="button" class="ghost compact-action" @onclick="CloseCustomerHistory">Close</button>
+            </header>
+
+            @if (_isLoadingHistory)
+            {
+                <p class="muted">Loading customer history...</p>
+            }
+            else if (!string.IsNullOrWhiteSpace(_historyError))
+            {
+                <p class="feedback error">@_historyError</p>
+            }
+            else if (_historyItems.Count == 0)
+            {
+                <p class="muted">No order or payment history is available yet.</p>
+            }
+            else
+            {
+                <div class="history-timeline">
+                    @foreach (var item in _historyItems)
+                    {
+                        <article class="history-item">
+                            <time datetime="@item.OccurredAtUtc.ToString("O")">@FormatHistoryDateTime(item.OccurredAtUtc)</time>
+                            <div>
+                                <span class="history-kind">@item.Kind</span>
+                                <h3>@item.Title</h3>
+                                <p>@item.Detail</p>
+                            </div>
+                            @if (!string.IsNullOrWhiteSpace(item.Amount))
+                            {
+                                <strong class="history-amount">@item.Amount</strong>
+                            }
+                        </article>
+                    }
+                </div>
+            }
+        </section>
+    </div>
+}
+
+@code {
+    [SupplyParameterFromQuery(Name = "apiBaseUrl")]
+    private string? PrefillApiBaseUrl { get; set; }
+
+    [SupplyParameterFromQuery(Name = "customerId")]
+    private Guid? PrefillCustomerId { get; set; }
+
+    private string _apiBaseUrl = WorkspaceSettingsService.DefaultApiBaseUrl;
+    private string _searchText = string.Empty;
+    private int _maxItems = 25;
+    private bool _isLoadingList;
+    private bool _isLoadingDetail;
+    private bool _isDeleting;
+    private bool _isSubmittingPayment;
+    private bool _isTransitioningStatus;
+    private bool _isFeedbackError;
+    private bool _isHistoryModalOpen;
+    private bool _isLoadingHistory;
+    private bool _isEditModalOpen;
+    private bool _isSavingCustomerEdit;
+    private bool _useCompactCustomerCards = true;
+    private CustomerQuickFilter _customerQuickFilter = CustomerQuickFilter.All;
+    private string? _feedbackMessage;
+    private string? _historyError;
+    private string? _editError;
+    private Guid? _selectedCustomerId;
+    private Guid? _confirmDeleteCustomerId;
+    private Guid? _activePaymentOrderId;
+    private Guid? _activeTransitionOrderId;
+    private decimal? _paymentAmount;
+    private string? _paymentNote;
+    private string _editFullName = string.Empty;
+    private string _editPhoneNumber = string.Empty;
+    private string _editCity = string.Empty;
+    private string? _editNotes;
+    private bool _isSavingMeasurements;
+    private string _measurementGarmentType = "Suit";
+    private List<MeasurementDraftRow> _measurementDraftRows = [];
+    private List<CustomerHistoryItem> _historyItems = [];
+    private List<CustomerWorkspaceItemDto> _customers = [];
+    private CustomerWorkspaceDetailResult? _detail;
+
+    private enum CustomerQuickFilter
+    {
+        All,
+        Balance,
+        Recent,
+        NoOrders,
+        Frequent,
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        _apiBaseUrl = WorkspaceSettings.ApiBaseUrl;
+
+        if (!string.IsNullOrWhiteSpace(PrefillApiBaseUrl))
+        {
+            WorkspaceSettings.ApplyApiBaseUrlOverride(PrefillApiBaseUrl);
+            _apiBaseUrl = WorkspaceSettings.ApiBaseUrl;
+        }
+
+        if (PrefillCustomerId.HasValue && PrefillCustomerId.Value != Guid.Empty)
+        {
+            _selectedCustomerId = PrefillCustomerId.Value;
+        }
+
+        await LoadCustomersAsync();
+    }
+
+    private async Task LoadCustomersAsync()
+    {
+        _isLoadingList = true;
+        _feedbackMessage = null;
+        _isFeedbackError = false;
+
+        var result = await CustomerWorkspaceService.GetWorklistAsync(_apiBaseUrl, _searchText, _maxItems);
+        _isLoadingList = false;
+
+        if (!result.IsSuccess)
+        {
+            _customers = [];
+            _detail = null;
+            _selectedCustomerId = null;
+            _feedbackMessage = result.ErrorMessage;
+            _isFeedbackError = true;
+            return;
+        }
+
+        _customers = result.Items.ToList();
+
+        if (_selectedCustomerId.HasValue && _customers.Any(customer => customer.CustomerId == _selectedCustomerId.Value))
+        {
+            await SelectCustomerAsync(_selectedCustomerId.Value);
+            return;
+        }
+
+        if (_customers.Count > 0)
+        {
+            await SelectCustomerAsync(_customers[0].CustomerId);
+        }
+        else
+        {
+            _detail = null;
+            _selectedCustomerId = null;
+        }
+    }
+
+    private async Task SelectCustomerAsync(Guid customerId)
+    {
+        _selectedCustomerId = customerId;
+        _confirmDeleteCustomerId = null;
+        _activePaymentOrderId = null;
+        _activeTransitionOrderId = null;
+        CloseCustomerHistory();
+        CloseCustomerEdit();
+        _isLoadingDetail = true;
+
+        var detail = await CustomerWorkspaceService.GetDetailAsync(_apiBaseUrl, customerId, recentOrderLimit: 5);
+        _isLoadingDetail = false;
+        _detail = detail;
+
+        if (!detail.IsSuccess)
+        {
+            _feedbackMessage = detail.ErrorMessage;
+            _isFeedbackError = true;
+            ResetMeasurementEditor();
+            return;
+        }
+
+        InitializeMeasurementEditor(detail.Customer!.BaselineMeasurementsJson, preferSavedWhenCurrentMissing: true);
+    }
+
+    private void ArmDelete(Guid customerId)
+    {
+        _confirmDeleteCustomerId = customerId;
+        _feedbackMessage = "Confirm delete only when you are sure this customer has no active order history to keep.";
+        _isFeedbackError = false;
+    }
+
+    private void CancelDelete()
+    {
+        _confirmDeleteCustomerId = null;
+        _feedbackMessage = null;
+        _isFeedbackError = false;
+    }
+
+    private async Task ConfirmDeleteSelectedAsync()
+    {
+        if (_confirmDeleteCustomerId is null)
+        {
+            return;
+        }
+
+        _isDeleting = true;
+        var result = await CustomerWorkspaceService.DeleteAsync(_apiBaseUrl, _confirmDeleteCustomerId.Value);
+        _isDeleting = false;
+
+        if (!result.IsSuccess)
+        {
+            _feedbackMessage = result.ErrorMessage;
+            _isFeedbackError = true;
+            return;
+        }
+
+        _feedbackMessage = "Customer deleted successfully.";
+        _isFeedbackError = false;
+        _confirmDeleteCustomerId = null;
+        _detail = null;
+        _selectedCustomerId = null;
+        await LoadCustomersAsync();
+    }
+
+    private void ClearSearch()
+    {
+        _searchText = string.Empty;
+        _customerQuickFilter = CustomerQuickFilter.All;
+    }
+
+    private IReadOnlyList<CustomerWorkspaceItemDto> GetVisibleCustomers()
+    {
+        var recentSinceUtc = DateTimeOffset.UtcNow.AddDays(-30);
+        return _customers
+            .Where(customer => _customerQuickFilter switch
+            {
+                CustomerQuickFilter.Balance => customer.OutstandingBalance > 0m,
+                CustomerQuickFilter.Recent => customer.LastOrderReceivedAtUtc is not null
+                    && customer.LastOrderReceivedAtUtc.Value >= recentSinceUtc,
+                CustomerQuickFilter.NoOrders => customer.OrderCount == 0,
+                CustomerQuickFilter.Frequent => customer.OrderCount >= 3,
+                _ => true,
+            })
+            .ToList();
+    }
+
+    private void SetCustomerQuickFilter(CustomerQuickFilter filter)
+    {
+        _customerQuickFilter = filter;
+    }
+
+    private string GetCustomerQuickFilterClass(CustomerQuickFilter filter)
+    {
+        return _customerQuickFilter == filter
+            ? "quick-filter active"
+            : "quick-filter";
+    }
+
+    private async Task PrintCustomerStatementAsync()
+    {
+        await JsRuntime.InvokeVoidAsync("print");
+    }
+
+    private void OpenCustomerEdit()
+    {
+        if (_detail?.Customer is null)
+        {
+            return;
+        }
+
+        _editFullName = _detail.Customer.FullName;
+        _editPhoneNumber = _detail.Customer.PhoneNumber;
+        _editCity = _detail.Customer.City;
+        _editNotes = _detail.Customer.Notes;
+        _editError = null;
+        _isEditModalOpen = true;
+    }
+
+    private void CloseCustomerEdit()
+    {
+        if (_isSavingCustomerEdit)
+        {
+            return;
+        }
+
+        _isEditModalOpen = false;
+        _editError = null;
+    }
+
+    private async Task SaveCustomerEditAsync()
+    {
+        if (_detail?.Customer is null)
+        {
+            return;
+        }
+
+        _isSavingCustomerEdit = true;
+        _editError = null;
+
+        var result = await CustomerWorkspaceService.UpdateAsync(
+            _apiBaseUrl,
+            _detail.Customer.CustomerId,
+            _editFullName,
+            _editPhoneNumber,
+            _editCity,
+            _editNotes);
+
+        _isSavingCustomerEdit = false;
+
+        if (!result.IsSuccess)
+        {
+            _editError = result.ErrorMessage;
+            return;
+        }
+
+        _isEditModalOpen = false;
+        _feedbackMessage = "Customer details updated.";
+        _isFeedbackError = false;
+        await LoadCustomersAsync();
+    }
+
+    private void ArmPayment(CustomerWorkspaceOrderDto order)
+    {
+        _activePaymentOrderId = order.OrderId;
+        _paymentAmount = order.BalanceDue > 0m ? order.BalanceDue : null;
+        _paymentNote = null;
+        _feedbackMessage = null;
+        _isFeedbackError = false;
+    }
+
+    private void CancelPayment()
+    {
+        _activePaymentOrderId = null;
+        _paymentAmount = null;
+        _paymentNote = null;
+    }
+
+    private async Task OpenCustomerHistoryAsync()
+    {
+        if (_detail?.Customer is null)
+        {
+            return;
+        }
+
+        _isHistoryModalOpen = true;
+        _isLoadingHistory = true;
+        _historyError = null;
+        _historyItems = [];
+
+        var historyItems = new List<CustomerHistoryItem>();
+        foreach (var order in _detail.Customer.RecentOrders)
+        {
+            var detailResult = await OrderWorklistService.GetDetailAsync(_apiBaseUrl, order.OrderId);
+            if (!detailResult.IsSuccess || detailResult.Order is null)
+            {
+                historyItems.Add(new CustomerHistoryItem(
+                    order.ReceivedAtUtc,
+                    "Order",
+                    $"{order.GarmentType} order received",
+                    $"Status {FormatStatus(order.Status)}. Due {FormatDate(order.DueAtUtc)}. Balance {FormatMoney(order.BalanceDue)}."));
+                continue;
+            }
+
+            AddOrderHistory(historyItems, detailResult.Order);
+        }
+
+        if (historyItems.Count == 0)
+        {
+            historyItems.Add(new CustomerHistoryItem(
+                _detail.Customer.UpdatedAtUtc,
+                "Profile",
+                "Customer profile updated",
+                "No orders are recorded for this customer yet."));
+        }
+
+        _historyItems = historyItems
+            .OrderByDescending(item => item.OccurredAtUtc)
+            .ToList();
+        _isLoadingHistory = false;
+    }
+
+    private void CloseCustomerHistory()
+    {
+        _isHistoryModalOpen = false;
+        _isLoadingHistory = false;
+        _historyError = null;
+        _historyItems = [];
+    }
+
+    private static void AddOrderHistory(List<CustomerHistoryItem> historyItems, OrderWorkspaceDetailDto order)
+    {
+        historyItems.Add(new CustomerHistoryItem(
+            order.ReceivedAtUtc,
+            "Order",
+            $"{order.GarmentType} order received",
+            $"Status {FormatStatus(order.Status)}. Due {FormatDate(order.DueAtUtc)}. Balance {FormatMoney(order.BalanceDue)}."));
+
+        if (order.TrialScheduledAtUtc is not null)
+        {
+            historyItems.Add(new CustomerHistoryItem(
+                order.TrialScheduledAtUtc.Value,
+                "Fitting",
+                $"{order.GarmentType} fitting scheduled",
+                string.IsNullOrWhiteSpace(order.TrialScheduleStatus)
+                    ? "Customer fitting date was saved for this order."
+                    : $"Fitting status: {order.TrialScheduleStatus}."));
+        }
+
+        foreach (var payment in order.Payments)
+        {
+            historyItems.Add(new CustomerHistoryItem(
+                payment.PaidAtUtc,
+                "Payment",
+                "Payment collected",
+                string.IsNullOrWhiteSpace(payment.Note)
+                    ? $"{order.GarmentType} order. Total {FormatMoney(order.AmountCharged)}. Paid {FormatMoney(order.AmountPaid)}. Balance {FormatMoney(order.BalanceDue)}."
+                    : $"{order.GarmentType} order. Total {FormatMoney(order.AmountCharged)}. Paid {FormatMoney(order.AmountPaid)}. Balance {FormatMoney(order.BalanceDue)}. Note: {payment.Note}",
+                FormatMoney(payment.Amount)));
+        }
+    }
+
+    private async Task SubmitPaymentAsync(CustomerWorkspaceOrderDto order)
+    {
+        if (_paymentAmount is null || _paymentAmount <= 0m)
+        {
+            _feedbackMessage = "Payment amount must be greater than zero.";
+            _isFeedbackError = true;
+            return;
+        }
+
+        if (_paymentAmount > order.BalanceDue)
+        {
+            _feedbackMessage = "Payment cannot exceed the current balance due.";
+            _isFeedbackError = true;
+            return;
+        }
+
+        _isSubmittingPayment = true;
+        await InvokeAsync(StateHasChanged);
+        await Task.Yield();
+        var result = await OrderWorklistService.AddPaymentAsync(
+            _apiBaseUrl,
+            order.OrderId,
+            _paymentAmount.Value,
+            _paymentNote);
+        _isSubmittingPayment = false;
+
+        if (!result.IsSuccess)
+        {
+            _feedbackMessage = result.ErrorMessage;
+            _isFeedbackError = true;
+            return;
+        }
+
+        _feedbackMessage = "Payment recorded successfully.";
+        _isFeedbackError = false;
+        CancelPayment();
+        await LoadCustomersAsync();
+    }
+
+    private void OnMeasurementGarmentTypeChanged(ChangeEventArgs eventArgs)
+    {
+        SelectMeasurementGarment(eventArgs.Value?.ToString());
+    }
+
+    private void SelectMeasurementGarment(string? garmentType)
+    {
+        _measurementGarmentType = string.IsNullOrWhiteSpace(garmentType)
+            ? GetDefaultMeasurementGarment()
+            : garmentType.Trim();
+
+        InitializeMeasurementEditor(_detail?.Customer?.BaselineMeasurementsJson);
+    }
+
+    private void AddMeasurementRow()
+    {
+        _measurementDraftRows.Add(new MeasurementDraftRow(Guid.NewGuid(), string.Empty, string.Empty));
+    }
+
+    private void RemoveMeasurementRow(Guid rowId)
+    {
+        _measurementDraftRows.RemoveAll(row => row.Id == rowId);
+
+        if (_measurementDraftRows.Count == 0)
+        {
+            _measurementDraftRows.Add(new MeasurementDraftRow(Guid.NewGuid(), string.Empty, string.Empty));
+        }
+    }
+
+    private void UpdateMeasurementName(Guid rowId, string? value)
+    {
+        var index = _measurementDraftRows.FindIndex(row => row.Id == rowId);
+        if (index < 0)
+        {
+            return;
+        }
+
+        _measurementDraftRows[index] = _measurementDraftRows[index] with { Name = value ?? string.Empty };
+    }
+
+    private void UpdateMeasurementValue(Guid rowId, string? value)
+    {
+        var index = _measurementDraftRows.FindIndex(row => row.Id == rowId);
+        if (index < 0)
+        {
+            return;
+        }
+
+        _measurementDraftRows[index] = _measurementDraftRows[index] with { ValueText = value ?? string.Empty };
+    }
+
+    private async Task SaveMeasurementsAsync()
+    {
+        if (_detail?.Customer is null)
+        {
+            return;
+        }
+
+        if (!TryBuildMeasurementPayload(out var measurements, out var validationMessage))
+        {
+            _feedbackMessage = validationMessage;
+            _isFeedbackError = true;
+            return;
+        }
+
+        _isSavingMeasurements = true;
+        await InvokeAsync(StateHasChanged);
+        await Task.Yield();
+
+        var result = await CustomerWorkspaceService.UpsertBaselineMeasurementsAsync(
+            _apiBaseUrl,
+            _detail.Customer.CustomerId,
+            _measurementGarmentType,
+            measurements);
+
+        _isSavingMeasurements = false;
+
+        if (!result.IsSuccess)
+        {
+            _feedbackMessage = result.ErrorMessage;
+            _isFeedbackError = true;
+            return;
+        }
+
+        _feedbackMessage = $"Baseline measurements saved for {_measurementGarmentType}.";
+        _isFeedbackError = false;
+        await SelectCustomerAsync(_detail.Customer.CustomerId);
+    }
+
+    private async Task HandleSearchKeyDown(KeyboardEventArgs eventArgs)
+    {
+        if (!string.Equals(eventArgs.Key, "Enter", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        await LoadCustomersAsync();
+    }
+
+    private async Task AdvanceStatusAsync(CustomerWorkspaceOrderDto order)
+    {
+        var nextStatus = GetNextStatus(order.Status);
+        if (nextStatus is null)
+        {
+            return;
+        }
+
+        _activeTransitionOrderId = order.OrderId;
+        _isTransitioningStatus = true;
+
+        var result = await OrderWorklistService.TransitionStatusAsync(
+            _apiBaseUrl,
+            order.OrderId,
+            nextStatus);
+
+        _isTransitioningStatus = false;
+        _activeTransitionOrderId = null;
+
+        if (!result.IsSuccess)
+        {
+            _feedbackMessage = result.ErrorMessage;
+            _isFeedbackError = true;
+            return;
+        }
+
+        _feedbackMessage = $"Order advanced to {FormatStatus(nextStatus)}.";
+        _isFeedbackError = false;
+        await LoadCustomersAsync();
+    }
+
+    private static bool TryReadMeasurements(string json, out IReadOnlyList<KeyValuePair<string, decimal>> measurements)
+    {
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<Dictionary<string, decimal>>(json) ?? [];
+            measurements = parsed
+                .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            return true;
+        }
+        catch (JsonException)
+        {
+            measurements = [];
+            return false;
+        }
+    }
+
+    private void InitializeMeasurementEditor(string? baselineMeasurementsJson, bool preferSavedWhenCurrentMissing = false)
+    {
+        var groups = ParseMeasurementGroups(baselineMeasurementsJson);
+        if (string.IsNullOrWhiteSpace(_measurementGarmentType))
+        {
+            _measurementGarmentType = GetDefaultMeasurementGarment();
+        }
+
+        if (preferSavedWhenCurrentMissing && groups.Count > 0 && !groups.ContainsKey(_measurementGarmentType))
+        {
+            _measurementGarmentType = groups.Keys
+                .OrderBy(GetGarmentSortKey, StringComparer.OrdinalIgnoreCase)
+                .First();
+        }
+
+        if (!groups.TryGetValue(_measurementGarmentType, out var selectedMeasurements) || selectedMeasurements.Count == 0)
+        {
+            _measurementDraftRows =
+            [
+                new MeasurementDraftRow(Guid.NewGuid(), string.Empty, string.Empty),
+            ];
+            return;
+        }
+
+        _measurementDraftRows = selectedMeasurements
+            .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(pair => new MeasurementDraftRow(Guid.NewGuid(), pair.Key, FormatMeasurementValue(pair.Value)))
+            .ToList();
+    }
+
+    private void ResetMeasurementEditor()
+    {
+        _measurementGarmentType = GetDefaultMeasurementGarment();
+        _measurementDraftRows =
+        [
+            new MeasurementDraftRow(Guid.NewGuid(), string.Empty, string.Empty),
+        ];
+    }
+
+    private IReadOnlyList<string> GetMeasurementGarmentOptions()
+    {
+        var options = new HashSet<string>(GetConfiguredGarmentTypes(), StringComparer.OrdinalIgnoreCase);
+        foreach (var garmentType in GetSavedMeasurementSets(_detail?.Customer?.BaselineMeasurementsJson))
+        {
+            options.Add(garmentType);
+        }
+
+        return options
+            .OrderBy(GetGarmentSortKey, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private string GetDefaultMeasurementGarment()
+    {
+        return GetConfiguredGarmentTypes()[0];
+    }
+
+    private IReadOnlyList<string> GetConfiguredGarmentTypes()
+    {
+        return WorkspaceSettings.GarmentTypes.Count == 0
+            ? WorkspaceSettingsService.DefaultGarmentTypes
+            : WorkspaceSettings.GarmentTypes;
+    }
+
+    private IReadOnlyList<string> GetSavedMeasurementSets(string? baselineMeasurementsJson)
+    {
+        return ParseMeasurementGroups(baselineMeasurementsJson)
+            .Keys
+            .OrderBy(GetGarmentSortKey, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static int GetSavedMeasurementSetCount(string? baselineMeasurementsJson)
+    {
+        return ParseMeasurementGroups(baselineMeasurementsJson).Count;
+    }
+
+    private static Dictionary<string, Dictionary<string, decimal>> ParseMeasurementGroups(string? baselineMeasurementsJson)
+    {
+        if (string.IsNullOrWhiteSpace(baselineMeasurementsJson))
+        {
+            return new Dictionary<string, Dictionary<string, decimal>>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<Dictionary<string, decimal>>(baselineMeasurementsJson) ?? [];
+            var grouped = new Dictionary<string, Dictionary<string, decimal>>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var pair in parsed)
+            {
+                var separatorIndex = pair.Key.IndexOf(':');
+                var garmentType = separatorIndex > 0 ? pair.Key[..separatorIndex].Trim() : "General";
+                var measurementName = separatorIndex > 0 ? pair.Key[(separatorIndex + 1)..].Trim() : pair.Key.Trim();
+
+                if (string.IsNullOrWhiteSpace(measurementName))
+                {
+                    continue;
+                }
+
+                if (!grouped.TryGetValue(garmentType, out var measurements))
+                {
+                    measurements = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+                    grouped[garmentType] = measurements;
+                }
+
+                measurements[measurementName] = pair.Value;
+            }
+
+            return grouped;
+        }
+        catch (JsonException)
+        {
+            return new Dictionary<string, Dictionary<string, decimal>>(StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    private bool TryBuildMeasurementPayload(
+        out IReadOnlyDictionary<string, decimal> measurements,
+        out string validationMessage)
+    {
+        var payload = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var row in _measurementDraftRows)
+        {
+            var name = row.Name.Trim();
+            var hasName = !string.IsNullOrWhiteSpace(name);
+            var valueText = row.ValueText.Trim();
+            var hasValue = !string.IsNullOrWhiteSpace(valueText);
+
+            if (!hasName && !hasValue)
+            {
+                continue;
+            }
+
+            if (!hasName)
+            {
+                measurements = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+                validationMessage = "Every measurement row needs a name.";
+                return false;
+            }
+
+            if (!hasValue || !TryParseMeasurementValue(valueText, out var numericValue) || numericValue <= 0m)
+            {
+                measurements = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+                validationMessage = "Measurement values must be valid numbers like 40, 3/2, or 1-3/2.";
+                return false;
+            }
+
+            if (!payload.TryAdd(name, numericValue))
+            {
+                measurements = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+                validationMessage = $"Duplicate measurement name '{name}' is not allowed.";
+                return false;
+            }
+        }
+
+        if (payload.Count == 0)
+        {
+            measurements = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+            validationMessage = "Add at least one measurement before saving.";
+            return false;
+        }
+
+        measurements = payload;
+        validationMessage = string.Empty;
+        return true;
+    }
+
+    private static string FormatMeasurementValue(decimal value)
+    {
+        return value.ToString("0.##", CultureInfo.InvariantCulture);
+    }
+
+    private static string FormatMoney(decimal amount)
+    {
+        return amount.ToString("0.##", CultureInfo.InvariantCulture);
+    }
+
+    private static string FormatOrderToken(Guid orderId)
+    {
+        return $"#{orderId.ToString("N")[..8]}";
+    }
+
+    private static string FormatDate(DateTimeOffset value)
+    {
+        return value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+    }
+
+    private static string GetLastOrderStatusText(CustomerWorkspaceDetailDto customer)
+    {
+        var latestOrder = customer.RecentOrders
+            .OrderByDescending(order => order.ReceivedAtUtc)
+            .FirstOrDefault();
+
+        return latestOrder is null
+            ? "Last Order: None"
+            : $"Last Order: {FormatStatus(latestOrder.Status)}";
+    }
+
+    private static string FormatHistoryDateTime(DateTimeOffset value)
+    {
+        return value.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+    }
+
+    private static bool TryParseMeasurementValue(string valueText, out decimal value)
+    {
+        value = 0m;
+
+        if (string.IsNullOrWhiteSpace(valueText))
+        {
+            return false;
+        }
+
+        var normalized = valueText.Trim();
+        if (decimal.TryParse(normalized, NumberStyles.Number, CultureInfo.InvariantCulture, out value))
+        {
+            return true;
+        }
+
+        if (decimal.TryParse(normalized, NumberStyles.Number, CultureInfo.CurrentCulture, out value))
+        {
+            return true;
+        }
+
+        var mixedSeparatorIndex = normalized.IndexOf('-');
+        if (mixedSeparatorIndex > 0)
+        {
+            var wholePart = normalized[..mixedSeparatorIndex].Trim();
+            var fractionPart = normalized[(mixedSeparatorIndex + 1)..].Trim();
+            if (decimal.TryParse(wholePart, NumberStyles.Integer, CultureInfo.InvariantCulture, out var wholeValue)
+                && TryParseFraction(fractionPart, out var fractionValue))
+            {
+                value = wholeValue + fractionValue;
+                return true;
+            }
+        }
+
+        var spaceSeparatorIndex = normalized.IndexOf(' ');
+        if (spaceSeparatorIndex > 0)
+        {
+            var wholePart = normalized[..spaceSeparatorIndex].Trim();
+            var fractionPart = normalized[(spaceSeparatorIndex + 1)..].Trim();
+            if (decimal.TryParse(wholePart, NumberStyles.Integer, CultureInfo.InvariantCulture, out var wholeValue)
+                && TryParseFraction(fractionPart, out var fractionValue))
+            {
+                value = wholeValue + fractionValue;
+                return true;
+            }
+        }
+
+        return TryParseFraction(normalized, out value);
+    }
+
+    private static bool TryParseFraction(string valueText, out decimal value)
+    {
+        value = 0m;
+        var parts = valueText.Split('/', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 2)
+        {
+            return false;
+        }
+
+        if (!decimal.TryParse(parts[0], NumberStyles.Number, CultureInfo.InvariantCulture, out var numerator)
+            || !decimal.TryParse(parts[1], NumberStyles.Number, CultureInfo.InvariantCulture, out var denominator)
+            || denominator == 0m)
+        {
+            return false;
+        }
+
+        value = numerator / denominator;
+        return true;
+    }
+
+    private string GetGarmentSortKey(string garmentType)
+    {
+        var defaultIndex = GetConfiguredGarmentTypes()
+            .Select((option, index) => new { option, index })
+            .FirstOrDefault(item => string.Equals(item.option, garmentType, StringComparison.OrdinalIgnoreCase))
+            ?.index ?? -1;
+
+        return defaultIndex >= 0
+            ? defaultIndex.ToString("D3", System.Globalization.CultureInfo.InvariantCulture)
+            : $"999-{garmentType}";
+    }
+
+    private static string FormatStatus(string status)
+    {
+        if (string.IsNullOrWhiteSpace(status))
+        {
+            return "Unknown";
+        }
+
+        return string.Concat(status.Select((character, index) =>
+            index > 0 && char.IsUpper(character) ? $" {character}" : character.ToString()));
+    }
+
+    private static string? GetNextStatus(string status)
+    {
+        return status switch
+        {
+            "New" => "InProgress",
+            "InProgress" => "TrialFitting",
+            "TrialFitting" => "Rework",
+            "Rework" => "Ready",
+            "Ready" => "Delivered",
+            _ => null,
+        };
+    }
+
+    private string GetFeedbackClass()
+    {
+        return _isFeedbackError ? "feedback error" : "feedback";
+    }
+
+    private void ToggleCustomerDensity()
+    {
+        _useCompactCustomerCards = !_useCompactCustomerCards;
+    }
+
+    private string GetCustomerListClass()
+    {
+        return _useCompactCustomerCards ? "customer-list compact-density" : "customer-list comfortable-density";
+    }
+
+    private string GetCustomerCardClass(bool isSelected)
+    {
+        var densityClass = _useCompactCustomerCards ? "compact" : "comfortable";
+        return isSelected ? $"customer-card {densityClass} selected" : $"customer-card {densityClass}";
+    }
+
+    private static string GetBalanceChipClass(decimal outstandingBalance)
+    {
+        return outstandingBalance > 0m ? "balance-chip due" : "balance-chip paid";
+    }
+
+    private static string FormatLastOrder(DateTimeOffset? value)
+    {
+        return value is null ? "No orders yet" : $"Last {FormatDate(value.Value)}";
+    }
+
+    private string BuildOrderPrefillLink(CustomerWorkspaceDetailDto customer)
+    {
+        var queryParts = new List<string>
+        {
+            $"customerId={Uri.EscapeDataString(customer.CustomerId.ToString())}",
+            $"fullName={Uri.EscapeDataString(customer.FullName)}",
+            $"phoneNumber={Uri.EscapeDataString(customer.PhoneNumber)}",
+            $"city={Uri.EscapeDataString(customer.City)}",
+        };
+
+        if (!string.IsNullOrWhiteSpace(customer.Notes))
+        {
+            queryParts.Add($"notes={Uri.EscapeDataString(customer.Notes)}");
+        }
+
+        return $"/orders/new?{string.Join("&", queryParts)}";
+    }
+
+    private string BuildOrderDetailLink(Guid orderId)
+    {
+        return $"/orders/{orderId}";
+    }
+
+    private sealed record MeasurementDraftRow(Guid Id, string Name, string ValueText);
+
+    private sealed record CustomerHistoryItem(
+        DateTimeOffset OccurredAtUtc,
+        string Kind,
+        string Title,
+        string Detail,
+        string? Amount = null);
+}
+
+<style>
+    .customers-shell {
+        display: grid;
+        gap: 1.1rem;
+    }
+
+    .customers-header,
+    .section-header,
+    .customer-card-topline,
+    .order-card-header,
+    .detail-actions,
+    .detail-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+    }
+
+    .customers-header {
+        padding: 1.25rem 1.35rem;
+        border: 1px solid #d8e0e8;
+        border-radius: 8px;
+        background:
+            radial-gradient(circle at top right, rgba(15, 118, 110, 0.14), transparent 32%),
+            radial-gradient(circle at bottom left, rgba(201, 122, 50, 0.14), transparent 28%),
+            linear-gradient(180deg, #fffdf8, #ffffff);
+        box-shadow: 0 24px 50px -36px rgba(21, 33, 43, 0.45);
+    }
+
+    .header-copy h1 {
+        margin: 0;
+        font-size: clamp(1.4rem, 2.6vw, 1.95rem);
+        letter-spacing: -0.03em;
+    }
+
+    .header-copy p:last-child {
+        color: #5f7183;
+        max-width: 42rem;
+        line-height: 1.55;
+        font-size: 0.96rem;
+    }
+
+    .eyebrow {
+        margin: 0 0 0.45rem;
+        color: #c97a32;
+        font-size: 0.76rem;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+    }
+
+    .workspace-grid,
+    .toolbar-grid,
+    .detail-sections {
+        display: grid;
+        gap: 1rem;
+    }
+
+    .workspace-grid {
+        grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+        align-items: start;
+    }
+
+    .toolbar-grid {
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    }
+
+    .toolbar-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.6rem;
+        margin-top: 0.85rem;
+    }
+
+    .customer-filter-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.45rem;
+        margin-top: 0.75rem;
+    }
+
+    .customer-filter-row span {
+        color: #607487;
+        font-size: 0.76rem;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+
+    .quick-filter {
+        border: 1px solid #cfdbe4;
+        border-radius: 4px;
+        padding: 0.32rem 0.55rem;
+        background: #f6f9fb;
+        color: #405465;
+        font-size: 0.78rem;
+        font-weight: 800;
+    }
+
+    .quick-filter.active {
+        border-color: #0f766e;
+        background: #eaf7f3;
+        color: #0b5f57;
+    }
+
+    .toolbar-card,
+    .list-card,
+    .detail-card,
+    .nested-card {
+        border: 1px solid #d8e0e8;
+        border-radius: 8px;
+        padding: 1rem;
+        background: rgba(255, 255, 255, 0.92);
+        box-shadow: 0 20px 42px -34px rgba(21, 33, 43, 0.35);
+    }
+
+    .customer-list,
+    .recent-orders {
+        display: grid;
+        gap: 0.75rem;
+    }
+
+    .customer-list.compact-density {
+        gap: 0.45rem;
+    }
+
+    .customer-list.comfortable-density {
+        gap: 0.75rem;
+    }
+
+    .section-header h2,
+    .detail-card h3,
+    .nested-card h3 {
+        margin: 0;
+        font-size: 1.05rem;
+        line-height: 1.3;
+    }
+
+    .section-header span {
+        font-size: 0.84rem;
+        color: #64748b;
+    }
+
+    .section-header-actions {
+        display: inline-flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+    }
+
+    .order-card-actions,
+    .payment-actions,
+    .measurement-editor-actions,
+    .measurement-set-list,
+    .modal-actions {
+        display: flex;
+        flex-wrap: wrap;
+        column-gap: 0.75rem;
+        row-gap: 0.65rem;
+        margin-top: 0.85rem;
+    }
+
+    .status-card-actions {
+        justify-content: flex-end;
+    }
+
+    .status-action-button {
+        box-shadow: 0 10px 20px -16px rgba(15, 118, 110, 0.95);
+        white-space: nowrap;
+    }
+
+    .measurement-editor-toolbar {
+        display: grid;
+        gap: 0.55rem;
+    }
+
+    .measurement-editor-toolbar {
+        grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
+        align-items: end;
+        margin: 1rem 0 0.75rem;
+    }
+
+    .measurement-editor-list {
+        display: grid;
+        gap: 0;
+        overflow: hidden;
+        border: 1px solid #dce5eb;
+        border-radius: 8px;
+        background: #ffffff;
+    }
+
+    .add-row-button {
+        justify-self: center;
+        width: 2.25rem;
+        height: 2.25rem;
+        padding: 0;
+        border-radius: 4px;
+        font-size: 1.15rem;
+        line-height: 1;
+    }
+
+    .measurement-editor-row {
+        grid-template-columns: minmax(0, 1.5fr) minmax(110px, 0.65fr) auto;
+        display: grid;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.42rem 0.5rem;
+        border-bottom: 1px solid #edf1f5;
+        background: #ffffff;
+    }
+
+    .measurement-editor-row:last-of-type {
+        border-bottom: none;
+    }
+
+    .measurement-editor-head {
+        background: #f7fafc;
+        color: #5b6e7d;
+        font-size: 0.72rem;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+
+    .measurement-editor-row input {
+        min-height: 2.35rem;
+        padding: 0.45rem 0.55rem;
+    }
+
+    .measurement-set-chip {
+        display: inline-flex;
+        align-items: center;
+        align-self: flex-start;
+        padding: 0.48rem 0.78rem;
+        border-radius: 999px;
+        background: #eef2f6;
+        color: #334155;
+        font-size: 0.88rem;
+        font-weight: 700;
+        line-height: 1.2;
+    }
+
+    .measurement-set-chip.selected {
+        background: #d7f5f0;
+        color: #0f766e;
+    }
+
+    .payment-panel {
+        display: grid;
+        gap: 0.75rem;
+        width: 100%;
+        margin-top: 0.85rem;
+        border-top: 1px solid #e2e8f0;
+        padding-top: 0.85rem;
+    }
+
+    .order-complete {
+        margin-top: 0.85rem;
+    }
+
+    .customer-card,
+    .order-card {
+        width: 100%;
+        border: 1px solid #dce5eb;
+        border-radius: 8px;
+        padding: 0.9rem;
+        background: linear-gradient(180deg, #fbfcfe, #f7fafc);
+        text-align: left;
+        color: #0f172a;
+    }
+
+    .customer-card.compact {
+        padding: 0.62rem 0.7rem;
+    }
+
+    .customer-card.comfortable {
+        padding: 0.9rem;
+    }
+
+    .customer-card-topline {
+        align-items: flex-start;
+        gap: 0.7rem;
+    }
+
+    .customer-identity {
+        min-width: 0;
+        display: grid;
+        gap: 0.08rem;
+    }
+
+    .customer-identity strong {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .customer-identity span {
+        color: #64748b;
+        font-size: 0.78rem;
+    }
+
+    .balance-chip {
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        min-height: 1.55rem;
+        padding: 0 0.48rem;
+        border-radius: 4px;
+        font-size: 0.75rem;
+        font-weight: 800;
+        white-space: nowrap;
+    }
+
+    .balance-chip.due {
+        background: #fff3ed;
+        color: #a33225;
+    }
+
+    .balance-chip.paid {
+        background: #eaf8f0;
+        color: #16613f;
+    }
+
+    .customer-card strong,
+    .customer-card span,
+    .order-card strong,
+    .order-card span {
+        color: inherit;
+    }
+
+    .customer-card:hover,
+    .order-card:hover {
+        border-color: #b9c8d6;
+        box-shadow: 0 18px 34px -30px rgba(21, 33, 43, 0.28);
+    }
+
+    .detail-header-title {
+        display: grid;
+        gap: 0.35rem;
+        min-width: 0;
+    }
+
+    .detail-header-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+    }
+
+    .detail-header-chips span,
+    .customer-notes summary {
+        border-radius: 4px;
+        padding: 0.18rem 0.46rem;
+        background: #eef3f6;
+        color: #405465;
+        font-size: 0.76rem;
+        font-weight: 800;
+    }
+
+    .customer-since {
+        margin: 0.2rem 0 0;
+        color: #647789;
+        font-size: 0.8rem;
+        font-weight: 700;
+    }
+
+    .customer-notes {
+        margin-top: 0.45rem;
+    }
+
+    .customer-notes summary {
+        display: inline-flex;
+        cursor: pointer;
+    }
+
+    .customer-notes p {
+        margin: 0.45rem 0 0;
+        color: #536b7c;
+    }
+
+    .customer-statement-print {
+        display: none;
+    }
+
+    .customer-card.selected {
+        border-color: #0f766e;
+        background: linear-gradient(180deg, #effcfa, #f8fffe);
+        box-shadow: inset 0 0 0 1px rgba(15, 118, 110, 0.12);
+    }
+
+    .customer-card-meta,
+    .order-card-meta,
+    .detail-stats {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        color: #475569;
+        font-size: 0.84rem;
+    }
+
+    .customer-card.compact .customer-card-meta {
+        gap: 0.42rem;
+        margin-top: 0.35rem;
+        font-size: 0.75rem;
+    }
+
+    .customer-card.comfortable .customer-card-meta {
+        margin-top: 0.55rem;
+    }
+
+    .customer-card-meta span {
+        display: inline-flex;
+        min-width: 0;
+        padding: 0.16rem 0.42rem;
+        border-radius: 4px;
+        background: #eef3f6;
+        color: #415264;
+        line-height: 1.25;
+    }
+
+    .customer-identity strong,
+    .order-card-header strong,
+    .detail-top h3 {
+        font-size: 1rem;
+        line-height: 1.3;
+    }
+
+    .customer-note {
+        margin: 0.55rem 0 0;
+        color: #64748b;
+        font-size: 0.84rem;
+        line-height: 1.35;
+    }
+
+    .detail-top p {
+        margin: 0.18rem 0;
+        font-size: 0.92rem;
+        line-height: 1.45;
+    }
+
+    .detail-stats {
+        justify-content: flex-end;
+    }
+
+    .stat-label {
+        display: block;
+        color: #64748b;
+        font-size: 0.8rem;
+    }
+
+    .measurement-list {
+        display: grid;
+        gap: 0.5rem;
+        margin: 0;
+    }
+
+    .measurement-list div {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        padding-bottom: 0.35rem;
+        border-bottom: 1px solid #e5e7eb;
+    }
+
+    .measurement-list.compact {
+        margin-top: 0.75rem;
+    }
+
+    .measurement-list dt,
+    .measurement-list dd {
+        margin: 0;
+    }
+
+    .feedback,
+    .delete-warning {
+        margin: 0.75rem 0 0;
+        padding: 0.75rem;
+        border-radius: 8px;
+        background: #ecfeff;
+        color: #115e59;
+    }
+
+    .feedback.error {
+        background: #fef2f2;
+        color: #991b1b;
+    }
+
+    .delete-warning {
+        background: #fff7ed;
+        color: #9a3412;
+    }
+
+    .primary-link,
+    .secondary-link,
+    button {
+        border: none;
+        border-radius: 4px;
+        padding: 0.62rem 0.9rem;
+        background: #0f766e;
+        color: #ffffff;
+        text-decoration: none;
+        cursor: pointer;
+        font-weight: 700;
+        font-size: 0.9rem;
+        line-height: 1.2;
+    }
+
+    .customer-filter-row .quick-filter {
+        border: 1px solid #cfdbe4;
+        border-radius: 4px;
+        padding: 0.32rem 0.55rem;
+        background: #f6f9fb;
+        color: #405465;
+        font-size: 0.78rem;
+        font-weight: 800;
+        min-height: auto;
+    }
+
+    .customer-filter-row .quick-filter.active {
+        border-color: #0f766e;
+        background: #eaf7f3;
+        color: #0b5f57;
+    }
+
+    .customers-header .primary-link,
+    .detail-actions .secondary-link,
+    .detail-actions button {
+        min-height: 2.5rem;
+    }
+
+    .detail-actions {
+        flex-wrap: wrap;
+        align-items: center;
+        column-gap: 0.85rem;
+        row-gap: 0.75rem;
+        margin-top: 1rem;
+        padding-top: 1rem;
+        border-top: 1px solid #e6edf2;
+    }
+
+    .detail-actions .danger {
+        margin-left: auto;
+    }
+
+    .secondary-link,
+    button.ghost {
+        background: #e6edf2;
+        color: #0f172a;
+    }
+
+    button.danger {
+        background: #b91c1c;
+    }
+
+    .compact-action {
+        min-height: 2rem;
+        padding: 0.45rem 0.7rem;
+        font-size: 0.82rem;
+        white-space: nowrap;
+    }
+
+    label {
+        display: grid;
+        gap: 0.35rem;
+        font-weight: 600;
+        font-size: 0.9rem;
+    }
+
+    input,
+    select,
+    textarea {
+        border: 1px solid #cbd5e1;
+        border-radius: 4px;
+        padding: 0.54rem 0.68rem;
+        background: #fcfdff;
+        width: 100%;
+        box-sizing: border-box;
+        font-size: 0.92rem;
+    }
+
+    textarea {
+        min-height: 5rem;
+        resize: vertical;
+        font: inherit;
+    }
+
+    .remove-measurement-button {
+        min-width: 4.75rem;
+        min-height: 2.35rem;
+        padding: 0.42rem 0.7rem;
+    }
+
+    .muted {
+        color: #64748b;
+        font-size: 0.9rem;
+    }
+
+    .json-box {
+        overflow: auto;
+        padding: 0.75rem;
+        border-radius: 8px;
+        background: #0f172a;
+        color: #e2e8f0;
+    }
+
+    .history-modal-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 80;
+        display: grid;
+        place-items: center;
+        padding: 1.25rem;
+        background: rgba(15, 23, 42, 0.42);
+        backdrop-filter: blur(6px);
+    }
+
+    .history-modal {
+        width: min(48rem, 100%);
+        max-height: min(86vh, 52rem);
+        overflow: auto;
+        border: 1px solid #d8e0e8;
+        border-radius: 8px;
+        padding: 1.1rem;
+        background: linear-gradient(180deg, #ffffff, #fbfcfe);
+        box-shadow: 0 28px 90px -42px rgba(15, 23, 42, 0.68);
+    }
+
+    .customer-edit-modal {
+        width: min(38rem, 100%);
+    }
+
+    .customer-edit-form {
+        display: grid;
+        gap: 0.8rem;
+    }
+
+    .history-modal-header {
+        position: sticky;
+        top: -1.1rem;
+        z-index: 2;
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 1rem;
+        padding: 1.1rem 0 0.9rem;
+        border-bottom: 1px solid #e2e8f0;
+        margin-bottom: 0.9rem;
+        background: linear-gradient(180deg, #ffffff, #fbfcfe);
+    }
+
+    .history-modal-header h2,
+    .history-modal-header p {
+        margin: 0;
+    }
+
+    .history-modal-header p:last-child {
+        margin-top: 0.3rem;
+        color: #64748b;
+        font-size: 0.9rem;
+    }
+
+    .history-timeline {
+        display: grid;
+        gap: 0.7rem;
+    }
+
+    .history-item {
+        display: grid;
+        grid-template-columns: 8.8rem minmax(0, 1fr) auto;
+        gap: 0.8rem;
+        align-items: start;
+        padding: 0.85rem;
+        border: 1px solid #dce5eb;
+        border-radius: 8px;
+        background: linear-gradient(180deg, #fbfcfe, #f8fafc);
+    }
+
+    .history-item time {
+        color: #64748b;
+        font-size: 0.82rem;
+        font-weight: 700;
+        white-space: nowrap;
+    }
+
+    .history-kind {
+        display: inline-flex;
+        width: fit-content;
+        margin-bottom: 0.35rem;
+        padding: 0.22rem 0.45rem;
+        border-radius: 4px;
+        background: #e6edf2;
+        color: #334155;
+        font-size: 0.72rem;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+
+    .history-item h3,
+    .history-item p {
+        margin: 0;
+    }
+
+    .history-item h3 {
+        font-size: 0.98rem;
+    }
+
+    .history-item p {
+        margin-top: 0.25rem;
+        color: #475569;
+        font-size: 0.88rem;
+        line-height: 1.45;
+    }
+
+    .history-amount {
+        color: #0f766e;
+        font-size: 0.95rem;
+        white-space: nowrap;
+    }
+
+    @@media (max-width: 960px) {
+        .workspace-grid {
+            grid-template-columns: 1fr;
+        }
+
+        .customers-header,
+        .section-header,
+        .detail-actions,
+        .detail-top {
+            align-items: flex-start;
+            flex-direction: column;
+        }
+
+        .detail-stats {
+            justify-content: flex-start;
+        }
+
+        .detail-actions .danger {
+            margin-left: 0;
+        }
+
+        .measurement-editor-toolbar,
+        .measurement-editor-row {
+            grid-template-columns: 1fr;
+        }
+
+        .history-modal-header,
+        .history-item {
+            grid-template-columns: 1fr;
+        }
+
+        .history-modal-header {
+            flex-direction: column;
+        }
+    }
+
+    @@media print {
+        html,
+        body {
+            height: auto !important;
+            min-height: 0 !important;
+            overflow: visible !important;
+            background: #ffffff !important;
+        }
+
+        .shell-sidebar,
+        .sidebar {
+            display: none !important;
+        }
+
+        .shell,
+        .app-shell,
+        .shell-main,
+        .shell-content,
+        .content {
+            display: block !important;
+            height: auto !important;
+            min-height: 0 !important;
+            overflow: visible !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            background: #ffffff !important;
+        }
+
+        .customers-shell,
+        .history-modal-backdrop {
+            display: none !important;
+        }
+
+        .customer-statement-print {
+            display: block;
+            color: #111827;
+            font-family: "Inter", "Aptos", "Segoe UI", Arial, sans-serif;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .statement-header {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr) auto;
+            gap: 0.8rem;
+            align-items: start;
+            padding-bottom: 0.7rem;
+            border-bottom: 2px solid #111827;
+            margin-bottom: 0.75rem;
+        }
+
+        .statement-header img {
+            width: 48px;
+            height: 48px;
+            object-fit: contain;
+        }
+
+        .statement-header h1 {
+            margin: 0;
+            font-size: 1.15rem;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+        }
+
+        .statement-header p {
+            margin: 0.18rem 0 0;
+            color: #374151;
+            font-size: 0.76rem;
+        }
+
+        .statement-header p span + span::before {
+            content: " | ";
+            color: #6b7280;
+        }
+
+        .statement-meta {
+            display: grid;
+            gap: 0.14rem;
+            text-align: right;
+            color: #374151;
+            font-size: 0.76rem;
+        }
+
+        .statement-meta strong {
+            color: #111827;
+            font-size: 0.92rem;
+        }
+
+        .statement-cards {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 0.35rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .statement-cards article {
+            border: 1px solid #9ca3af;
+            padding: 0.42rem;
+            display: grid;
+            gap: 0.12rem;
+        }
+
+        .statement-cards span {
+            color: #4b5563;
+            font-size: 0.62rem;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .statement-cards strong {
+            color: #111827;
+            font-size: 0.82rem;
+        }
+
+        .statement-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.68rem;
+        }
+
+        .statement-table th,
+        .statement-table td {
+            border: 1px solid #c7cdd4;
+            padding: 0.25rem 0.32rem;
+            text-align: left;
+            vertical-align: top;
+        }
+
+        .statement-table th {
+            background: #e5e7eb;
+            color: #111827;
+            font-weight: 800;
+            text-transform: uppercase;
+        }
+
+        .statement-table tbody tr:nth-child(even) {
+            background: #f8fafc;
+        }
+
+        @@page {
+            size: portrait;
+            margin: 12mm;
+        }
+    }
+</style>

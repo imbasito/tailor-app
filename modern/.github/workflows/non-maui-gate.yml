@@ -1,0 +1,45 @@
+name: non-maui-gate
+
+on:
+  pull_request:
+    paths:
+      - "modern/**"
+  push:
+    branches:
+      - master
+    paths:
+      - "modern/**"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore API graph
+        run: dotnet restore modern/src/STailor.Api/STailor.Api.csproj
+
+      - name: Build API strict
+        run: dotnet build modern/src/STailor.Api/STailor.Api.csproj -warnaserror --no-restore
+
+      - name: Test Core
+        run: dotnet test modern/tests/STailor.Core.Tests/STailor.Core.Tests.csproj --no-build
+
+      - name: Test Modules
+        run: dotnet test modern/tests/STailor.Modules.Core.Tests/STailor.Modules.Core.Tests.csproj --no-build
+
+      - name: Test Infrastructure
+        run: dotnet test modern/tests/STailor.Infrastructure.Tests/STailor.Infrastructure.Tests.csproj --no-build
+
+      - name: Test UI RCL
+        run: dotnet test modern/tests/STailor.UI.Rcl.Tests/STailor.UI.Rcl.Tests.csproj --no-build
+
+      - name: Test API
+        run: dotnet test modern/tests/STailor.Api.Tests/STailor.Api.Tests.csproj --no-build

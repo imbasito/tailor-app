@@ -1,0 +1,852 @@
+@page "/reports"
+@using Microsoft.AspNetCore.Components.Web.Virtualization
+@using Microsoft.JSInterop
+@using STailor.Shared.Contracts.Reports
+@inject ReportingServiceClient ReportingService
+@inject WorkspaceSettingsService WorkspaceSettings
+@inject IJSRuntime JsRuntime
+
+<section class="reports-shell">
+    <header class="reports-header">
+        <div>
+            <p class="eyebrow">Reports</p>
+            <h1>Operations Report</h1>
+            <p>Complete order, payment, balance, garment, and late-order view for the shop.</p>
+        </div>
+        <div class="report-header-actions">
+            <button type="button" class="secondary" @onclick="PrintAsync" disabled="@(_isLoading || _report is null)">Print</button>
+            <button type="button" @onclick="LoadAsync" disabled="@_isLoading">
+                @(_isLoading ? "Loading..." : "Refresh")
+            </button>
+        </div>
+    </header>
+
+    <section class="report-filters">
+        <label>
+            Search
+            <input type="search"
+                   @bind="_searchText"
+                   @onkeydown="HandleSearchKeyDown"
+                   placeholder="Name, phone, city, order, garment" />
+        </label>
+
+        <label>
+            Status
+            <select @bind="_statusFilter">
+                <option value="Any">Any</option>
+                <option value="New">New</option>
+                <option value="InProgress">In Progress</option>
+                <option value="TrialFitting">Fitting</option>
+                <option value="Rework">Rework</option>
+                <option value="Ready">Ready</option>
+                <option value="Delivered">Delivered</option>
+            </select>
+        </label>
+
+        <label>
+            From
+            <input
+                type="date"
+                value="@_fromDateText"
+                @onchange="eventArgs => _fromDateText = eventArgs.Value?.ToString() ?? string.Empty"
+                @onkeydown="HandleSearchKeyDown" />
+        </label>
+
+        <label>
+            To
+            <input
+                type="date"
+                value="@_toDateText"
+                @onchange="eventArgs => _toDateText = eventArgs.Value?.ToString() ?? string.Empty"
+                @onkeydown="HandleSearchKeyDown" />
+        </label>
+
+        <label class="checkbox-row">
+            <input type="checkbox" @bind="_includeDelivered" />
+            Include delivered
+        </label>
+
+        <div class="filter-actions">
+            <button type="button" class="secondary" @onclick="SearchAsync" disabled="@_isLoading">Search</button>
+            <button type="button" class="secondary" @onclick="ClearFiltersAsync" disabled="@_isLoading">Clear</button>
+        </div>
+    </section>
+
+    @if (!string.IsNullOrWhiteSpace(_message))
+    {
+        <div class="@(_isError ? "report-feedback error" : "report-feedback")" role="status">@_message</div>
+    }
+
+    @if (_report is null && _isLoading)
+    {
+        <p class="empty-state">Loading report...</p>
+    }
+    else if (_report is null)
+    {
+        <p class="empty-state">No report data loaded yet.</p>
+    }
+    else
+    {
+        <section class="print-report-header" aria-label="Printed report header">
+            <div class="print-report-logo-slot">
+                @if (!string.IsNullOrWhiteSpace(WorkspaceSettings.LogoDataUrl))
+                {
+                    <img class="print-report-logo" src="@WorkspaceSettings.LogoDataUrl" alt="@WorkspaceSettings.ProductName logo" />
+                }
+            </div>
+            <div>
+                <h1>@WorkspaceSettings.ProductName</h1>
+                @if (!string.IsNullOrWhiteSpace(WorkspaceSettings.ShopAddress))
+                {
+                    <p>@WorkspaceSettings.ShopAddress</p>
+                }
+                <p>
+                    @if (!string.IsNullOrWhiteSpace(WorkspaceSettings.ShopPhoneNumber))
+                    {
+                        <span>Phone: @WorkspaceSettings.ShopPhoneNumber</span>
+                    }
+                    @if (!string.IsNullOrWhiteSpace(WorkspaceSettings.NationalTaxNumber))
+                    {
+                        <span>NTN: @WorkspaceSettings.NationalTaxNumber</span>
+                    }
+                    @if (!string.IsNullOrWhiteSpace(WorkspaceSettings.SalesTaxRegistrationNumber))
+                    {
+                        <span>STRN: @WorkspaceSettings.SalesTaxRegistrationNumber</span>
+                    }
+                </p>
+            </div>
+            <div class="print-report-meta">
+                <strong>Operations Report</strong>
+                <span>Date: @DateTime.Now.ToString("yyyy-MM-dd HH:mm")</span>
+            </div>
+        </section>
+
+        <section class="report-stats" aria-label="Report summary">
+            <article>
+                <span>Total Orders</span>
+                <strong>@_report.TotalOrders</strong>
+                <small>@_report.OpenOrders open, @_report.DeliveredOrders delivered</small>
+            </article>
+            <article class="warning">
+                <span>Late Orders</span>
+                <strong>@_report.OverdueOrders</strong>
+                <small>Open orders past due date</small>
+            </article>
+            <article>
+                <span>Total Charged</span>
+                <strong>@FormatMoney(_report.TotalCharged)</strong>
+                <small>All matching orders</small>
+            </article>
+            <article>
+                <span>Total Paid</span>
+                <strong>@FormatMoney(_report.TotalPaid)</strong>
+                <small>@_report.CollectionRatePercent.ToString("0.##")% collected</small>
+            </article>
+            <article class="due">
+                <span>Total Due</span>
+                <strong>@FormatMoney(_report.TotalBalanceDue)</strong>
+                <small>Remaining balance</small>
+            </article>
+        </section>
+
+        <section class="report-card detail-card">
+            <header>
+                <div>
+                    <h2>Order Details</h2>
+                    <p>Full list for the current filters. Generated @_report.GeneratedAt.ToString("yyyy-MM-dd HH:mm").</p>
+                </div>
+                <span>@_report.Orders.Count rows</span>
+            </header>
+
+            <div class="details-table-wrap">
+                <div class="details-table">
+                    <div class="details-row details-head">
+                        <span>#</span>
+                        <span>Order</span>
+                        <span>Customer</span>
+                        <span>Phone</span>
+                        <span>City</span>
+                        <span>Garment</span>
+                        <span>Status</span>
+                        <span>Received</span>
+                        <span>Due</span>
+                        <span>Charged</span>
+                        <span>Paid</span>
+                        <span>Balance</span>
+                        <span>Late</span>
+                    </div>
+
+                    <Virtualize Items="@_report.Orders.Select((order, index) => new IndexedOrderReportRow(index + 1, order)).ToList()" Context="row" ItemSize="42" OverscanCount="12">
+                        @{
+                            var item = row.Order;
+                        }
+                        <div class="details-row @(item.IsOverdue ? "late-row" : null)">
+                            <span>@row.Index</span>
+                            <span class="mono">@FormatOrderToken(item.OrderId)</span>
+                            <span>@item.CustomerName</span>
+                            <span>@item.CustomerPhone</span>
+                            <span>@item.City</span>
+                            <span>@item.GarmentType</span>
+                            <span><span class="status-pill">@FormatStatus(item.Status)</span></span>
+                            <span>@item.ReceivedAt.ToString("yyyy-MM-dd")</span>
+                            <span>@item.DueAt.ToString("yyyy-MM-dd")</span>
+                            <span>@FormatMoney(item.AmountCharged)</span>
+                            <span>@FormatMoney(item.AmountPaid)</span>
+                            <span>@FormatMoney(item.BalanceDue)</span>
+                            <span>@(item.IsOverdue ? $"{item.DaysLate} day(s)" : "-")</span>
+                        </div>
+                    </Virtualize>
+                </div>
+            </div>
+
+            <table class="print-details-table">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Order</th>
+                        <th>Customer</th>
+                        <th>Phone</th>
+                        <th>City</th>
+                        <th>Garment</th>
+                        <th>Status</th>
+                        <th>Received</th>
+                        <th>Due</th>
+                        <th>Charged</th>
+                        <th>Paid</th>
+                        <th>Balance</th>
+                        <th>Late</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var row in _report.Orders.Select((order, index) => new IndexedOrderReportRow(index + 1, order)))
+                    {
+                        var item = row.Order;
+                        <tr class="@(item.IsOverdue ? "late-row" : null)">
+                            <td>@row.Index</td>
+                            <td>@FormatOrderToken(item.OrderId)</td>
+                            <td>@item.CustomerName</td>
+                            <td>@item.CustomerPhone</td>
+                            <td>@item.City</td>
+                            <td>@item.GarmentType</td>
+                            <td>@FormatStatus(item.Status)</td>
+                            <td>@item.ReceivedAt.ToString("yyyy-MM-dd")</td>
+                            <td>@item.DueAt.ToString("yyyy-MM-dd")</td>
+                            <td>@FormatMoney(item.AmountCharged)</td>
+                            <td>@FormatMoney(item.AmountPaid)</td>
+                            <td>@FormatMoney(item.BalanceDue)</td>
+                            <td>@(item.IsOverdue ? $"{item.DaysLate} day(s)" : "-")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </section>
+    }
+</section>
+
+@code {
+    private sealed record IndexedOrderReportRow(int Index, OperationsReportOrderDto Order);
+
+    private OperationsReportDto? _report;
+    private string _searchText = string.Empty;
+    private string _statusFilter = "Any";
+    private string _fromDateText = string.Empty;
+    private string _toDateText = string.Empty;
+    private bool _includeDelivered = true;
+    private bool _isLoading = true;
+    private bool _isError;
+    private string? _message;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _isLoading = true;
+        _message = null;
+        _isError = false;
+
+        if (!TryBuildDateRange(out var fromDate, out var toDate))
+        {
+            _isLoading = false;
+            _report = null;
+            _message = "Choose a valid report date range.";
+            _isError = true;
+            return;
+        }
+
+        var result = await ReportingService.GetOperationsReportAsync(
+            WorkspaceSettings.ApiBaseUrl,
+            string.IsNullOrWhiteSpace(_searchText) ? null : _searchText,
+            _statusFilter,
+            _includeDelivered,
+            fromDate,
+            toDate);
+
+        _isLoading = false;
+
+        if (!result.IsSuccess || result.Report is null)
+        {
+            _report = null;
+            _message = result.ErrorMessage ?? "Unable to load report.";
+            _isError = true;
+            return;
+        }
+
+        _report = result.Report;
+    }
+
+    private async Task SearchAsync()
+    {
+        await LoadAsync();
+    }
+
+    private async Task PrintAsync()
+    {
+        await JsRuntime.InvokeVoidAsync("print");
+    }
+
+    private async Task ClearFiltersAsync()
+    {
+        _searchText = string.Empty;
+        _statusFilter = "Any";
+        _fromDateText = string.Empty;
+        _toDateText = string.Empty;
+        _includeDelivered = true;
+        await LoadAsync();
+    }
+
+    private async Task HandleSearchKeyDown(KeyboardEventArgs args)
+    {
+        if (string.Equals(args.Key, "Enter", StringComparison.OrdinalIgnoreCase))
+        {
+            await SearchAsync();
+        }
+    }
+
+    private static string FormatMoney(decimal amount)
+    {
+        return amount.ToString("0.##");
+    }
+
+    private bool TryBuildDateRange(out DateTime? fromDate, out DateTime? toDate)
+    {
+        fromDate = null;
+        toDate = null;
+
+        if (!string.IsNullOrWhiteSpace(_fromDateText))
+        {
+            if (!DateTime.TryParse(_fromDateText, out var parsedFromDate))
+            {
+                return false;
+            }
+
+            fromDate = parsedFromDate.Date;
+        }
+
+        if (!string.IsNullOrWhiteSpace(_toDateText))
+        {
+            if (!DateTime.TryParse(_toDateText, out var parsedToDate))
+            {
+                return false;
+            }
+
+            toDate = parsedToDate.Date;
+        }
+
+        return fromDate is null || toDate is null || fromDate.Value <= toDate.Value;
+    }
+
+    private static string FormatOrderToken(Guid orderId)
+    {
+        return $"#{orderId.ToString("N")[..8]}";
+    }
+
+    private string BuildFilterSummary()
+    {
+        var parts = new List<string>();
+
+        if (!string.IsNullOrWhiteSpace(_searchText))
+        {
+            parts.Add($"Search: {_searchText.Trim()}");
+        }
+
+        if (!string.Equals(_statusFilter, "Any", StringComparison.OrdinalIgnoreCase))
+        {
+            parts.Add($"Status: {FormatStatus(_statusFilter)}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(_fromDateText) || !string.IsNullOrWhiteSpace(_toDateText))
+        {
+            parts.Add($"Received: {(_fromDateText.Length == 0 ? "Start" : _fromDateText)} to {(_toDateText.Length == 0 ? "Today" : _toDateText)}");
+        }
+
+        if (!_includeDelivered)
+        {
+            parts.Add("Delivered hidden");
+        }
+
+        return parts.Count == 0 ? "Filters: All matching orders" : string.Join(" | ", parts);
+    }
+
+    private static string FormatStatus(string status)
+    {
+        return status switch
+        {
+            "InProgress" => "In Progress",
+            "TrialFitting" => "Fitting",
+            _ => status,
+        };
+    }
+}
+
+<style>
+    .reports-shell {
+        display: grid;
+        gap: 1rem;
+    }
+
+    .reports-header,
+    .report-filters,
+    .report-card {
+        border: 1px solid #dbe4ec;
+        border-radius: 8px;
+        background: #ffffff;
+        box-shadow: 0 16px 34px -30px rgba(20, 32, 43, 0.24);
+    }
+
+    .reports-header {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        align-items: flex-start;
+        padding: 1rem;
+    }
+
+    .report-header-actions {
+        display: inline-flex;
+        flex-wrap: wrap;
+        gap: 0.55rem;
+        justify-content: flex-end;
+    }
+
+    .eyebrow {
+        margin: 0 0 0.25rem;
+        color: #b8612a;
+        font-size: 0.72rem;
+        font-weight: 800;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+    }
+
+    .reports-header h1,
+    .report-card h2 {
+        margin: 0;
+        color: #13283a;
+    }
+
+    .reports-header p,
+    .report-card p {
+        margin: 0.35rem 0 0;
+        color: #536b7c;
+        font-size: 0.9rem;
+    }
+
+    button {
+        border: 1px solid #0b6e4f;
+        border-radius: 4px;
+        padding: 0.55rem 0.85rem;
+        background: #0b6e4f;
+        color: #ffffff;
+        font: inherit;
+        font-weight: 800;
+        cursor: pointer;
+    }
+
+    button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+    }
+
+    .secondary {
+        border-color: #b8cfdd;
+        color: #184967;
+        background: #edf4f9;
+    }
+
+    .report-filters {
+        padding: 0.85rem;
+        display: grid;
+        grid-template-columns: minmax(240px, 1.35fr) minmax(150px, 0.7fr) minmax(145px, 0.65fr) minmax(145px, 0.65fr) auto auto;
+        gap: 0.7rem;
+        align-items: end;
+    }
+
+    label {
+        display: grid;
+        gap: 0.35rem;
+        color: #304352;
+        font-size: 0.82rem;
+        font-weight: 800;
+    }
+
+    input,
+    select {
+        border: 1px solid #cfdbe4;
+        border-radius: 4px;
+        padding: 0.55rem 0.65rem;
+        background: #ffffff;
+        color: #172a3a;
+        font: inherit;
+        font-weight: 600;
+    }
+
+    input:focus,
+    select:focus {
+        outline: 2px solid rgba(11, 110, 79, 0.2);
+        border-color: #0b6e4f;
+    }
+
+    .checkbox-row {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.45rem;
+        padding-bottom: 0.55rem;
+    }
+
+    .filter-actions {
+        display: inline-flex;
+        gap: 0.45rem;
+    }
+
+    .report-feedback,
+    .empty-state {
+        border-radius: 8px;
+        padding: 0.75rem 0.9rem;
+        background: #eef8f2;
+        border: 1px solid #b9dec8;
+        color: #1f6b4d;
+    }
+
+    .report-feedback.error {
+        border-color: #f4c8c1;
+        background: #fff1ef;
+        color: #9a3127;
+    }
+
+    .report-stats {
+        display: grid;
+        gap: 0.75rem;
+        grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
+    }
+
+    .report-stats article {
+        border: 1px solid #dbe4ec;
+        border-radius: 8px;
+        background: #ffffff;
+        padding: 0.85rem;
+        display: grid;
+        gap: 0.25rem;
+    }
+
+    .report-stats span,
+    .report-card header > span {
+        color: #647789;
+        font-size: 0.73rem;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+
+    .report-stats strong {
+        color: #13283a;
+        font-size: 1.45rem;
+    }
+
+    .report-stats small {
+        color: #587083;
+        font-size: 0.78rem;
+        font-weight: 700;
+    }
+
+    .report-stats .due strong,
+    .report-stats .warning strong {
+        color: #9a3127;
+    }
+
+    .report-card {
+        padding: 0.9rem;
+    }
+
+    .report-card header {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        align-items: flex-start;
+        margin-bottom: 0.75rem;
+    }
+
+    .print-report-header,
+    .print-details-table {
+        display: none;
+    }
+
+    .details-table-wrap {
+        overflow: auto;
+        border: 1px solid #edf1f5;
+        border-radius: 8px;
+        height: 62vh;
+        max-height: 62vh;
+    }
+
+    .details-table {
+        min-width: 1120px;
+        font-size: 0.82rem;
+    }
+
+    .details-row {
+        display: grid;
+        grid-template-columns: 0.35fr 0.8fr 1.25fr 1.15fr 0.9fr 0.85fr 0.85fr 0.9fr 0.9fr 0.85fr 0.75fr 0.85fr 0.65fr;
+        align-items: center;
+    }
+
+    .details-row > span {
+        border-bottom: 1px solid #edf1f5;
+        padding: 0.55rem 0.65rem;
+        text-align: left;
+        white-space: nowrap;
+    }
+
+    .details-head {
+        position: sticky;
+        top: 0;
+        background: #f7fafc;
+        color: #506879;
+        font-size: 0.7rem;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        z-index: 1;
+    }
+
+    .details-row:not(.details-head):hover {
+        background: #f8fbfd;
+    }
+
+    .late-row {
+        background: #fff8f6;
+    }
+
+    .mono {
+        font-family: "Consolas", "Courier New", monospace;
+        font-weight: 800;
+    }
+
+    .status-pill {
+        display: inline-flex;
+        border-radius: 999px;
+        padding: 0.18rem 0.5rem;
+        background: #eef5fb;
+        color: #244d67;
+        font-weight: 800;
+    }
+
+    @@media (max-width: 900px) {
+        .reports-header,
+        .report-card header {
+            flex-direction: column;
+        }
+
+        .report-filters {
+            grid-template-columns: 1fr;
+        }
+
+        .checkbox-row {
+            padding-bottom: 0;
+        }
+
+        .filter-actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+        }
+    }
+
+    @@media print {
+        html,
+        body {
+            height: auto !important;
+            min-height: 0 !important;
+            overflow: visible !important;
+            background: #ffffff !important;
+        }
+
+        .shell-sidebar,
+        .sidebar {
+            display: none !important;
+        }
+
+        .shell,
+        .app-shell,
+        .shell-main,
+        .shell-content,
+        .content {
+            display: block !important;
+            height: auto !important;
+            min-height: 0 !important;
+            overflow: visible !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            background: #ffffff !important;
+        }
+
+        .reports-header,
+        .report-filters,
+        .report-feedback,
+        .empty-state,
+        .details-table-wrap {
+            display: none !important;
+        }
+
+        .reports-shell {
+            gap: 0.6rem;
+            color: #111827;
+            font-family: "Inter", "Aptos", "Segoe UI", Arial, sans-serif;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .print-report-header {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr) auto;
+            gap: 1.5rem;
+            align-items: start;
+            padding-bottom: 0.75rem;
+            border-bottom: 2px solid #111827;
+            margin-bottom: 0.75rem;
+        }
+
+        .print-report-logo-slot {
+            width: 52px;
+            min-height: 52px;
+        }
+
+        .print-report-logo {
+            width: 52px;
+            height: 52px;
+            object-fit: contain;
+        }
+
+        .print-report-header h1 {
+            margin: 0;
+            font-size: 1.3rem;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+        }
+
+        .print-report-header p {
+            margin: 0.2rem 0 0;
+            color: #374151;
+            font-size: 0.78rem;
+        }
+
+        .print-report-header p span + span::before {
+            content: " | ";
+            color: #6b7280;
+        }
+
+        .print-report-meta {
+            display: grid;
+            gap: 0.18rem;
+            min-width: 15rem;
+            color: #374151;
+            font-size: 0.78rem;
+            text-align: right;
+        }
+
+        .print-report-meta strong {
+            color: #111827;
+            font-size: 1rem;
+        }
+
+        .report-stats {
+            grid-template-columns: repeat(5, 1fr);
+            gap: 0.35rem;
+            break-inside: avoid;
+            margin-bottom: 0.75rem;
+        }
+
+        .report-stats article {
+            padding: 0.45rem;
+            border-color: #9ca3af;
+            box-shadow: none;
+        }
+
+        .report-stats span,
+        .report-stats small {
+            font-size: 0.62rem;
+        }
+
+        .report-stats strong {
+            font-size: 0.95rem;
+        }
+
+        .report-card {
+            padding: 0;
+            border: none;
+            box-shadow: none;
+        }
+
+        .report-card header {
+            margin: 0.65rem 0 0.35rem;
+            break-inside: avoid;
+        }
+
+        .report-card h2 {
+            font-size: 0.95rem;
+        }
+
+        .report-card p,
+        .report-card header > span {
+            font-size: 0.68rem;
+        }
+
+        .print-details-table {
+            display: table;
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.58rem;
+        }
+
+        .print-details-table th,
+        .print-details-table td {
+            padding: 0.22rem 0.28rem;
+            border: 1px solid #c7cdd4;
+            text-align: left;
+            vertical-align: top;
+        }
+
+        .print-details-table thead {
+            display: table-header-group;
+        }
+
+        .print-details-table th {
+            background: #e5e7eb;
+            color: #111827;
+            font-weight: 800;
+            text-transform: uppercase;
+        }
+
+        .print-details-table tbody tr:nth-child(even) {
+            background: #f8fafc;
+        }
+
+        .print-details-table .late-row {
+            background: #fff4f2;
+        }
+
+        @@page {
+            size: landscape;
+            margin: 12mm;
+        }
+    }
+</style>

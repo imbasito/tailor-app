@@ -1,0 +1,292 @@
+@page "/reports/outstanding-dues"
+@inject ReportingServiceClient ReportingService
+@inject NavigationManager NavigationManager
+
+<PageTitle>Outstanding Dues - STailor</PageTitle>
+
+<div class="container-fluid py-4">
+    <h2>Outstanding Dues / Receivables</h2>
+
+    <!-- Filters -->
+    <div class="card mb-4">
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-md-2">
+                    <label class="form-label">Min Balance</label>
+                    <input type="number" class="form-control" @bind="_filter.MinBalanceDue" placeholder="0" />
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">Max Balance</label>
+                    <input type="number" class="form-control" @bind="_filter.MaxBalanceDue" placeholder="Any" />
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">Status</label>
+                    <select class="form-select" @bind="_filter.Status">
+                        <option value="">All Statuses</option>
+                        <option value="New">New</option>
+                        <option value="InProgress">In Progress</option>
+                        <option value="TrialFitting">Trial/Fitting</option>
+                        <option value="Rework">Rework</option>
+                        <option value="Ready">Ready</option>
+                        <option value="Delivered">Delivered</option>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">Order By</label>
+                    <select class="form-select" @bind="_filter.OrderBy">
+                        <option value="BalanceDesc">Balance (High-Low)</option>
+                        <option value="DueDateAsc">Due Date</option>
+                        <option value="CustomerName">Customer Name</option>
+                    </select>
+                </div>
+                <div class="col-md-2 d-flex align-items-end">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" @bind="_filter.OverdueOnly" id="overdueCheck" />
+                        <label class="form-check-label" for="overdueCheck">Overdue Only</label>
+                    </div>
+                </div>
+                <div class="col-md-2 d-flex align-items-end">
+                    <button class="btn btn-primary w-100" @onclick="LoadReportAsync">
+                        <i class="bi bi-search"></i> Generate
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    @if (_isLoading)
+    {
+        <div class="text-center py-5">
+            <div class="spinner-border" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+        </div>
+    }
+    else if (_report != null)
+    {
+        <!-- Summary Cards -->
+        <div class="row mb-4">
+            <div class="col-md-3">
+                <div class="card bg-warning text-dark">
+                    <div class="card-body">
+                        <h6 class="card-title">Outstanding Orders</h6>
+                        <h3>@_report.TotalOrdersWithDues</h3>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-danger text-white">
+                    <div class="card-body">
+                        <h6 class="card-title">Total Due</h6>
+                        <h3>@FormatCurrency(_report.TotalOutstandingAmount)</h3>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-info text-white">
+                    <div class="card-body">
+                        <h6 class="card-title">Collected</h6>
+                        <h3>@_report.CollectionRatePercent%</h3>
+                        <small>@FormatCurrency(_report.TotalCollectedAmount)</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card @(GetOverdueCardClass())">
+                    <div class="card-body">
+                        <h6 class="card-title">Overdue</h6>
+                        <h3>@_report.OverdueCount</h3>
+                        <small>@FormatCurrency(_report.OverdueAmount)</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Status Breakdown -->
+        @if (_report.ByStatus.Any())
+        {
+            <div class="row mb-4">
+                <div class="col-md-12">
+                    <h5>By Status</h5>
+                    <div class="d-flex flex-wrap gap-2">
+                        @foreach (var status in _report.ByStatus)
+                        {
+                            <span class="badge bg-secondary fs-6">
+                                @status.Status: @status.OrderCount orders - @FormatCurrency(status.OutstandingAmount)
+                            </span>
+                        }
+                    </div>
+                </div>
+            </div>
+        }
+
+        <!-- Orders Table -->
+        @if (_report.Orders.Any())
+        {
+            <div class="row">
+                <div class="col-md-12">
+                    <h5>Outstanding Orders</h5>
+                    <div class="table-responsive">
+                        <table class="table table-hover">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Order #</th>
+                                    <th>Customer</th>
+                                    <th>Phone</th>
+                                    <th>Charged</th>
+                                    <th>Paid</th>
+                                    <th>Balance</th>
+                                    <th>Due Date</th>
+                                    <th>Days</th>
+                                    <th>Status</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var order in _report.Orders)
+                                {
+                                    <tr class="@(order.IsOverdue ? "table-warning" : "")">
+                                        <td>@order.OrderNumber</td>
+                                        <td>@order.CustomerName</td>
+                                        <td>@order.CustomerPhone</td>
+                                        <td class="text-end">@FormatCurrency(order.AmountCharged)</td>
+                                        <td class="text-end">@FormatCurrency(order.TotalPaid)</td>
+                                        <td class="text-end fw-bold text-danger">@FormatCurrency(order.BalanceDue)</td>
+                                        <td>@(order.DueDate?.ToString("MMM dd") ?? "-")</td>
+                                        <td>
+                                            @if (order.IsOverdue)
+                                            {
+                                                <span class="badge bg-danger">@order.DaysOverdue days overdue</span>
+                                            }
+                                            else if (order.DaysOverdue < 0)
+                                            {
+                                                <span class="badge bg-success">@Math.Abs(order.DaysOverdue) days left</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="badge bg-secondary">Due today</span>
+                                            }
+                                        </td>
+                                        <td>
+                                            <span class="badge @GetStatusBadgeClass(order.Status)">
+                                                @order.Status
+                                            </span>
+                                        </td>
+                                        <td>
+                                            <button class="btn btn-sm btn-success" @onclick="() => SendReminder(order)"
+                                                    title="Send WhatsApp reminder">
+                                                <i class="bi bi-whatsapp"></i>
+                                            </button>
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Bulk WhatsApp -->
+            <div class="row mt-4">
+                <div class="col-md-12">
+                    <button class="btn btn-outline-success" @onclick="SendBulkReminders">
+                        <i class="bi bi-whatsapp"></i> Send Reminders to All Overdue
+                    </button>
+                </div>
+            </div>
+        }
+        else
+        {
+            <div class="alert alert-success">
+                <i class="bi bi-check-circle"></i> No outstanding dues found matching your criteria.
+            </div>
+        }
+    }
+</div>
+
+@code {
+    private OutstandingDuesFilter _filter = new();
+    private OutstandingDuesReportDto? _report;
+    private bool _isLoading;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadReportAsync();
+    }
+
+    private async Task LoadReportAsync()
+    {
+        _isLoading = true;
+        try
+        {
+            _report = await ReportingService.GetOutstandingDuesReportAsync(
+                _filter.MinBalanceDue,
+                _filter.MaxBalanceDue,
+                _filter.Status,
+                _filter.OverdueOnly,
+                _filter.OrderBy);
+        }
+        finally
+        {
+            _isLoading = false;
+        }
+    }
+
+    private async Task SendReminder(OutstandingDueItemDto order)
+    {
+        if (!string.IsNullOrEmpty(order.CustomerPhone))
+        {
+            var link = WhatsAppPrefillLinkBuilder.BuildFromOutstandingDueItem(order);
+            NavigationManager.NavigateTo(link);
+        }
+
+        await Task.CompletedTask;
+    }
+
+    private async Task SendBulkReminders()
+    {
+        if (_report?.Orders == null) return;
+
+        var overdueOrders = _report.Orders.Where(o => o.IsOverdue && !string.IsNullOrEmpty(o.CustomerPhone)).Take(5);
+        foreach (var order in overdueOrders)
+        {
+            await SendReminder(order);
+            await Task.Delay(500); // Small delay between launches
+        }
+    }
+
+    private string FormatCurrency(decimal amount)
+    {
+        return $"PKR {amount:N0}";
+    }
+
+    private string GetOverdueCardClass()
+    {
+        if (_report?.OverdueCount > 10) return "bg-danger text-white";
+        if (_report?.OverdueCount > 0) return "bg-warning text-dark";
+        return "bg-success text-white";
+    }
+
+    private string GetStatusBadgeClass(string status)
+    {
+        return status?.ToLower() switch
+        {
+            "new" => "bg-secondary",
+            "inprogress" => "bg-primary",
+            "trialfitting" => "bg-info",
+            "rework" => "bg-warning text-dark",
+            "ready" => "bg-success",
+            "delivered" => "bg-dark",
+            _ => "bg-secondary"
+        };
+    }
+
+    public class OutstandingDuesFilter
+    {
+        public decimal? MinBalanceDue { get; set; }
+        public decimal? MaxBalanceDue { get; set; }
+        public string? Status { get; set; }
+        public bool OverdueOnly { get; set; }
+        public string OrderBy { get; set; } = "BalanceDesc";
+    }
+}

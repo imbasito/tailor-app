@@ -1,0 +1,636 @@
+@page "/"
+@using STailor.Shared.Contracts.Customers
+@using STailor.Shared.Contracts.Orders
+@using STailor.UI.Rcl.Services
+@inject OrderWorklistService OrderWorklistService
+@inject CustomerWorkspaceService CustomerWorkspaceService
+@inject WorkspaceSettingsService WorkspaceSettings
+
+<section class="ops-dashboard">
+    <header class="ops-header">
+        <div>
+            <p class="ops-eyebrow">Daily operations</p>
+            <h1>Run today&apos;s floor from one clean screen.</h1>
+            <p class="ops-copy">Start with today&apos;s orders, open balances, and late work without digging through reports.</p>
+        </div>
+        <div class="ops-actions">
+            <a class="primary-link" href="/orders/new">New Order</a>
+            <a class="secondary-link" href="/orders/board?preset=today">Today</a>
+        </div>
+    </header>
+
+    @if (WorkspaceSettings.NeedsSetup)
+    {
+        <section class="setup-panel" aria-label="First-run setup">
+            <div class="setup-copy">
+                <h2>Before you start</h2>
+                <p>Give the shop a name once. After this, staff can go straight into orders and customers.</p>
+            </div>
+            <div class="setup-form">
+                <label>
+                    Shop name
+                    <input type="text" @bind="_setupProductName" placeholder="SINYX Tailor Management" />
+                </label>
+                <div class="setup-actions">
+                    <button type="button" class="primary-link button-link" @onclick="SaveSetupAsync">Finish setup</button>
+                    <a class="secondary-link" href="/settings">More options</a>
+                </div>
+            </div>
+
+            @if (!string.IsNullOrWhiteSpace(_setupMessage))
+            {
+                <div class="setup-feedback @(_isSetupError ? "error" : "ok")" role="status">@_setupMessage</div>
+            }
+        </section>
+    }
+
+    @if (!string.IsNullOrWhiteSpace(_errorMessage))
+    {
+        <div class="ops-feedback" role="status">@_errorMessage</div>
+    }
+
+    <section class="focus-grid">
+        <a class="focus-card focus-active" href="/orders/board?preset=today">
+            <span>Active Orders</span>
+            <strong>@_activeOrders.Count</strong>
+            <small>@BuildActiveOrdersSummary()</small>
+        </a>
+        <a class="focus-card focus-late" href="/orders/board?overdueOnly=true">
+            <span>Late Orders</span>
+            <strong>@_lateOrders.Count</strong>
+            <small>@BuildLateOrdersSummary()</small>
+        </a>
+        <a class="focus-card focus-collections" href="/money">
+            <span>Balance Collection</span>
+            <strong>@FormatCurrency(_totalCollectionBalance)</strong>
+            <small>@BuildCollectionSummary()</small>
+        </a>
+        <a class="focus-card focus-customers" href="/customers">
+            <span>Customers</span>
+            <strong>@_customerCount</strong>
+            <small>@BuildCustomerSummary()</small>
+        </a>
+    </section>
+
+    <div class="ops-grid">
+        <section class="ops-panel">
+            <div class="panel-heading">
+                <div>
+                    <h2>Balance collection</h2>
+                    <p>Customers with open balances that are worth following up today.</p>
+                </div>
+                <a href="/customers">Open customer list</a>
+            </div>
+
+            @RenderCustomerList(
+                _collectionCustomers,
+                "No customer balances are open right now.")
+        </section>
+
+        <section class="ops-panel">
+            <div class="panel-heading">
+                <div>
+                    <h2>Late orders</h2>
+                    <p>Orders already past due and needing an immediate decision.</p>
+                </div>
+                <a href="/orders/board?overdueOnly=true">View overdue</a>
+            </div>
+
+            @RenderOrderList(
+                _lateOrders,
+                "No overdue orders right now.",
+                showBalance: true,
+                showDueDate: true)
+        </section>
+    </div>
+</section>
+
+@code {
+    private bool _isLoading = true;
+    private string? _errorMessage;
+    private List<OrderWorklistItemDto> _activeOrders = [];
+    private List<OrderWorklistItemDto> _lateOrders = [];
+    private List<CustomerWorkspaceItemDto> _collectionCustomers = [];
+    private int _customerCount;
+    private decimal _totalCollectionBalance;
+    private string _setupProductName = WorkspaceSettingsService.DefaultProductName;
+    private string? _setupMessage;
+    private bool _isSetupError;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _setupProductName = WorkspaceSettings.ProductName;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _isLoading = true;
+        _errorMessage = null;
+
+        var apiBaseUrl = WorkspaceSettings.ApiBaseUrl;
+
+        var activeOrdersResult = await OrderWorklistService.GetAsync(
+            apiBaseUrl,
+            includeDelivered: false,
+            maxItems: 250);
+
+        var overdueOrdersResult = await OrderWorklistService.GetAsync(
+            apiBaseUrl,
+            includeDelivered: false,
+            maxItems: 100,
+            overdueOnly: true);
+
+        var customersResult = await CustomerWorkspaceService.GetWorklistAsync(
+            apiBaseUrl,
+            searchText: null,
+            maxItems: 100);
+
+        _isLoading = false;
+
+        var errors = new[]
+        {
+            activeOrdersResult.IsSuccess ? null : activeOrdersResult.ErrorMessage,
+            overdueOrdersResult.IsSuccess ? null : overdueOrdersResult.ErrorMessage,
+            customersResult.IsSuccess ? null : customersResult.ErrorMessage,
+        }
+        .Where(message => !string.IsNullOrWhiteSpace(message))
+        .Distinct(StringComparer.Ordinal)
+        .ToArray();
+
+        if (errors.Length > 0)
+        {
+            _errorMessage = string.Join(" ", errors);
+        }
+
+        _activeOrders = activeOrdersResult.IsSuccess
+            ? activeOrdersResult.Items
+                .OrderBy(item => item.DueAtUtc)
+                .ThenBy(item => item.CustomerName, StringComparer.OrdinalIgnoreCase)
+                .ToList()
+            : [];
+
+        _lateOrders = overdueOrdersResult.IsSuccess
+            ? overdueOrdersResult.Items
+                .OrderBy(item => item.DueAtUtc)
+                .ThenBy(item => item.CustomerName, StringComparer.OrdinalIgnoreCase)
+                .Take(6)
+                .ToList()
+            : [];
+
+        _collectionCustomers = customersResult.IsSuccess
+            ? customersResult.Items
+                .Where(item => item.OutstandingBalance > 0m)
+                .OrderByDescending(item => item.OutstandingBalance)
+                .ThenBy(item => item.FullName, StringComparer.OrdinalIgnoreCase)
+                .Take(6)
+                .ToList()
+            : [];
+
+        _customerCount = customersResult.IsSuccess
+            ? customersResult.Items.Count
+            : 0;
+
+        _totalCollectionBalance = _activeOrders.Sum(item => item.BalanceDue);
+    }
+
+    private RenderFragment RenderCustomerList(
+        IReadOnlyList<CustomerWorkspaceItemDto> items,
+        string emptyMessage)
+        => @<text>
+            @if (_isLoading)
+            {
+                <p class="empty-state">Loading dashboard section...</p>
+            }
+            else if (items.Count == 0)
+            {
+                <p class="empty-state">@emptyMessage</p>
+            }
+            else
+            {
+                <div class="row-list">
+                    @foreach (var customer in items)
+                    {
+                        <a class="row-card" href="@($"/customers?customerId={Uri.EscapeDataString(customer.CustomerId.ToString())}")">
+                            <div class="row-main">
+                                <strong>@customer.FullName</strong>
+                                <span>@customer.PhoneNumber</span>
+                            </div>
+                            <div class="row-side">
+                                <strong>@FormatCurrency(customer.OutstandingBalance)</strong>
+                                <span>@customer.OrderCount open order(s)</span>
+                            </div>
+                        </a>
+                    }
+                </div>
+            }
+        </text>;
+
+    private RenderFragment RenderOrderList(
+        IReadOnlyList<OrderWorklistItemDto> items,
+        string emptyMessage,
+        bool showBalance,
+        bool showDueDate,
+        bool showTrialDate = false)
+        => @<text>
+            @if (_isLoading)
+            {
+                <p class="empty-state">Loading dashboard section...</p>
+            }
+            else if (items.Count == 0)
+            {
+                <p class="empty-state">@emptyMessage</p>
+            }
+            else
+            {
+                <div class="row-list">
+                    @foreach (var item in items)
+                    {
+                        <a class="row-card" href="@($"/orders/{item.OrderId}")">
+                            <div class="row-main">
+                                <strong>@item.CustomerName</strong>
+                                <span>@item.GarmentType · @FormatStatus(item.Status)</span>
+                            </div>
+                            <div class="row-side">
+                                @if (showTrialDate && item.TrialScheduledAtUtc is not null)
+                                {
+                                    <strong>@item.TrialScheduledAtUtc.Value.LocalDateTime.ToString("dd MMM")</strong>
+                                    <span>Trial scheduled</span>
+                                }
+                                else if (showDueDate)
+                                {
+                                    <strong>@item.DueAtUtc.LocalDateTime.ToString("dd MMM")</strong>
+                                    <span>Due date</span>
+                                }
+                                else if (showBalance)
+                                {
+                                    <strong>@FormatCurrency(item.BalanceDue)</strong>
+                                    <span>Balance due</span>
+                                }
+                                else
+                                {
+                                    <strong>@item.PhoneNumber</strong>
+                                    <span>Customer phone</span>
+                                }
+                            </div>
+                        </a>
+                    }
+                </div>
+            }
+        </text>;
+
+    private string BuildActiveOrdersSummary()
+    {
+        return _activeOrders.Count == 0
+            ? "No active work in the queue."
+            : $"{_activeOrders.Count} order(s) currently on the floor.";
+    }
+
+    private string BuildLateOrdersSummary()
+    {
+        return _lateOrders.Count == 0
+            ? "No overdue work."
+            : $"{_lateOrders.Count} order(s) are already past due.";
+    }
+
+    private string BuildCollectionSummary()
+    {
+        var customers = _collectionCustomers.Count;
+        return customers == 0
+            ? "No balances need chasing."
+            : $"{customers} customer(s) currently owe a balance.";
+    }
+
+    private string BuildCustomerSummary()
+    {
+        return _customerCount == 0
+            ? "No customers loaded yet."
+            : $"{_customerCount} customer record(s) available.";
+    }
+
+    private Task SaveSetupAsync()
+    {
+        try
+        {
+            WorkspaceSettings.UpdateBranding(_setupProductName);
+            _setupProductName = WorkspaceSettings.ProductName;
+            _setupMessage = "Setup saved. The app is ready to use.";
+            _isSetupError = false;
+        }
+        catch (ArgumentException exception)
+        {
+            _setupMessage = exception.Message;
+            _isSetupError = true;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private static string FormatStatus(string status)
+    {
+        if (string.IsNullOrWhiteSpace(status))
+        {
+            return "Unknown";
+        }
+
+        return string.Concat(status.Select((character, index) =>
+            index > 0 && char.IsUpper(character) ? $" {character}" : character.ToString()));
+    }
+
+    private static string FormatCurrency(decimal value)
+    {
+        return string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0:0.00}", value);
+    }
+}
+
+<style>
+    .ops-dashboard {
+        display: grid;
+        gap: 1rem;
+    }
+
+    .ops-header,
+    .panel-heading {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 1rem;
+    }
+
+    .ops-header h1,
+    .panel-heading h2 {
+        margin: 0;
+    }
+
+    .ops-eyebrow {
+        margin: 0 0 0.35rem;
+        color: #b86a24;
+        font-size: 0.73rem;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+    }
+
+    .ops-copy,
+    .panel-heading p {
+        margin: 0.4rem 0 0;
+        color: #617284;
+        line-height: 1.5;
+    }
+
+    .ops-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.7rem;
+    }
+
+    .focus-grid,
+    .ops-grid {
+        display: grid;
+        gap: 0.95rem;
+    }
+
+    .focus-grid {
+        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    }
+
+    .ops-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .focus-card,
+    .ops-panel {
+        border: 1px solid #d9e2ea;
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.96);
+        box-shadow: 0 16px 34px -30px rgba(20, 32, 43, 0.22);
+    }
+
+    .focus-card {
+        padding: 1rem;
+        display: grid;
+        gap: 0.35rem;
+        color: #15212b;
+        text-decoration: none;
+    }
+
+    .focus-card span,
+    .focus-card small,
+    .row-card span,
+    .action-link span {
+        color: #627486;
+    }
+
+    .focus-card strong {
+        font-size: 1.5rem;
+        line-height: 1.05;
+    }
+
+    .focus-active {
+        background: linear-gradient(180deg, #fffaf2 0%, #ffffff 100%);
+    }
+
+    .focus-late {
+        background: linear-gradient(180deg, #fff7f6 0%, #ffffff 100%);
+    }
+
+    .focus-collections {
+        background: linear-gradient(180deg, #f6fcf8 0%, #ffffff 100%);
+    }
+
+    .focus-customers {
+        background: linear-gradient(180deg, #f7fbff 0%, #ffffff 100%);
+    }
+
+    .ops-panel {
+        padding: 1rem;
+        display: grid;
+        gap: 0.9rem;
+    }
+
+    .ops-panel-wide {
+        grid-column: span 2;
+    }
+
+    .panel-heading a {
+        color: #0f766e;
+        font-weight: 700;
+        text-decoration: none;
+        white-space: nowrap;
+    }
+
+    .row-list {
+        display: grid;
+        gap: 0.75rem;
+    }
+
+    .row-card {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 1rem;
+        padding: 0.9rem 0.95rem;
+        border: 1px solid #e4ebf1;
+        border-radius: 8px;
+        background: #f8fafc;
+        color: #15212b;
+        text-decoration: none;
+    }
+
+    .row-card:hover,
+    .focus-card:hover {
+        border-color: #bccbd6;
+        background: #f4f8fa;
+    }
+
+    .row-main,
+    .row-side {
+        min-width: 0;
+    }
+
+    .row-main strong,
+    .row-side strong {
+        display: block;
+        margin-bottom: 0.16rem;
+    }
+
+    .row-side {
+        text-align: right;
+        flex: 0 0 auto;
+    }
+
+    .primary-link,
+    .secondary-link {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0.8rem 1rem;
+        border-radius: 8px;
+        text-decoration: none;
+        font-weight: 700;
+    }
+
+    .primary-link {
+        background: #0f766e;
+        color: #ffffff;
+    }
+
+    .secondary-link {
+        background: #e8eff4;
+        color: #15212b;
+    }
+
+    .ops-feedback {
+        padding: 0.8rem 0.95rem;
+        border-radius: 8px;
+        background: #fff7ed;
+        color: #9a3412;
+    }
+
+    .setup-panel {
+        display: grid;
+        gap: 1rem;
+        padding: 1rem 1.05rem;
+        border: 1px solid #d8e3ec;
+        border-radius: 8px;
+        background: linear-gradient(180deg, #fffdf9 0%, #ffffff 100%);
+        box-shadow: 0 16px 34px -30px rgba(20, 32, 43, 0.22);
+    }
+
+    .setup-copy h2 {
+        margin: 0;
+    }
+
+    .setup-copy p {
+        margin: 0.35rem 0 0;
+        color: #617284;
+        line-height: 1.5;
+    }
+
+    .setup-form {
+        display: grid;
+        gap: 0.85rem;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        align-items: end;
+    }
+
+    .setup-form label {
+        display: grid;
+        gap: 0.4rem;
+        font-weight: 700;
+        color: #213645;
+    }
+
+    .setup-form input {
+        border: 1px solid #d0dae3;
+        border-radius: 8px;
+        padding: 0.72rem 0.85rem;
+        font: inherit;
+        background: #fff;
+    }
+
+    .setup-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.7rem;
+        align-items: center;
+    }
+
+    .button-link {
+        border: 0;
+        cursor: pointer;
+        font: inherit;
+    }
+
+    .setup-feedback {
+        padding: 0.8rem 0.95rem;
+        border-radius: 8px;
+        font-weight: 600;
+    }
+
+    .setup-feedback.ok {
+        background: #edf8f2;
+        color: #13663f;
+    }
+
+    .setup-feedback.error {
+        background: #fff4f2;
+        color: #9f2f24;
+    }
+
+    .empty-state {
+        margin: 0;
+        color: #64748b;
+    }
+
+    @@media (max-width: 1080px) {
+        .ops-grid {
+            grid-template-columns: 1fr;
+        }
+
+        .ops-panel-wide {
+            grid-column: span 1;
+        }
+    }
+
+    @@media (max-width: 760px) {
+        .ops-header,
+        .panel-heading,
+        .row-card {
+            flex-direction: column;
+            align-items: flex-start;
+        }
+
+        .setup-actions {
+            width: 100%;
+        }
+
+        .setup-actions > * {
+            width: 100%;
+        }
+
+        .row-side {
+            text-align: left;
+        }
+    }
+</style>

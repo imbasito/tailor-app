@@ -1,0 +1,535 @@
+@page "/orders/{OrderId:guid}"
+@using System.Text.Json
+@using Microsoft.AspNetCore.Components
+@using STailor.Shared.Contracts.Orders
+@using STailor.UI.Rcl.Services
+@inject OrderWorklistService OrderWorklistService
+@inject WorkspaceSettingsService WorkspaceSettings
+
+<section class="order-detail-shell">
+    <header class="detail-header">
+        <div class="header-copy">
+            <p class="eyebrow">Single Order Record</p>
+            <h1>Order Detail</h1>
+            <p>Review customer details, saved measurements, payment history, and current workflow in one place.</p>
+        </div>
+        <a class="ghost-link" href="@BuildCustomerLink()">Back to Customer Record</a>
+    </header>
+
+    <section class="toolbar-card">
+        <div class="toolbar-actions">
+            <button type="button" @onclick="LoadAsync" disabled="@_isLoading">Reload</button>
+        </div>
+    </section>
+
+    @if (!string.IsNullOrWhiteSpace(_feedbackMessage))
+    {
+        <p class="@GetFeedbackClass()">@_feedbackMessage</p>
+    }
+
+    @if (_isLoading)
+    {
+        <p>Loading order detail...</p>
+    }
+    else if (_detail?.Order is null)
+    {
+        <p class="muted">Order detail is not available.</p>
+    }
+    else
+    {
+        var order = _detail.Order;
+        <div class="detail-grid">
+            <section class="detail-card">
+                <div class="summary-head">
+                    <div>
+                        <h2>Order Summary</h2>
+                        <p><strong>Status:</strong> @FormatStatus(order.Status)</p>
+                    </div>
+                    <div class="status-action-panel">
+                        @{
+                            var nextStatus = GetNextStatus(order.Status);
+                        }
+                        @if (nextStatus is not null)
+                        {
+                            <button type="button" class="primary-button status-button" @onclick="AdvanceStatusAsync" disabled="@_isTransitioningStatus">
+                                @(_isTransitioningStatus ? "Advancing..." : $"Advance to {FormatStatus(nextStatus)}")
+                            </button>
+                        }
+                        else
+                        {
+                            <p class="muted">Lifecycle complete.</p>
+                        }
+                    </div>
+                </div>
+                <p><strong>Garment:</strong> @order.GarmentType</p>
+                <p><strong>Received:</strong> @order.ReceivedAtUtc.ToString("yyyy-MM-dd")</p>
+                <p><strong>Due:</strong> @order.DueAtUtc.ToString("yyyy-MM-dd")</p>
+                <p><strong>Charged:</strong> @order.AmountCharged</p>
+                <p><strong>Paid:</strong> @order.AmountPaid</p>
+                <p><strong>Balance:</strong> @order.BalanceDue</p>
+                @if (order.TrialScheduledAtUtc is not null)
+                {
+                    <p><strong>Trial/Fitting:</strong> @order.TrialScheduledAtUtc.Value.ToString("yyyy-MM-dd HH:mm") (@order.TrialScheduleStatus)</p>
+                }
+
+            </section>
+
+            <section class="detail-card">
+                <h2>Customer</h2>
+                <p><strong>Name:</strong> @order.CustomerName</p>
+                <p><strong>Phone:</strong> @order.PhoneNumber</p>
+                <p><strong>City:</strong> @order.City</p>
+                <a class="ghost-link" href="@BuildCustomerLink()">Open Customer Record</a>
+            </section>
+
+            <section class="detail-card">
+                <h2>Measurements Saved With This Order</h2>
+                @if (TryReadMeasurements(order.MeasurementSnapshotJson, out var measurements))
+                {
+                    if (measurements.Count == 0)
+                    {
+                        <p class="muted">No saved measurements found.</p>
+                    }
+                    else
+                    {
+                        <dl class="measurement-list">
+                            @foreach (var measurement in measurements)
+                            {
+                                <div>
+                                    <dt>@measurement.Key</dt>
+                                    <dd>@measurement.Value</dd>
+                                </div>
+                            }
+                        </dl>
+                    }
+                }
+                else
+                {
+                    <pre class="json-box">@order.MeasurementSnapshotJson</pre>
+                }
+            </section>
+
+            <section class="detail-card">
+                <h2>Payment History</h2>
+                @if (order.BalanceDue > 0m)
+                {
+                    <div class="payment-entry">
+                        <label>
+                            Payment Amount
+                            <input type="number" min="0.01" max="@order.BalanceDue" step="0.01" @bind="_paymentAmount" />
+                        </label>
+                        <label>
+                            Note (Optional)
+                            <input type="text" @bind="_paymentNote" placeholder="Cash, transfer, pickup" />
+                        </label>
+                        <div class="toolbar-actions">
+                            <button type="button" class="primary-button" @onclick="SubmitPaymentAsync" disabled="@_isSubmittingPayment">
+                                @(_isSubmittingPayment ? "Saving Payment..." : "Save Payment")
+                            </button>
+                        </div>
+                    </div>
+                }
+                @if (order.Payments.Count == 0)
+                {
+                    <p class="muted">No payments recorded yet.</p>
+                }
+                else
+                {
+                    <div class="payment-list">
+                        @foreach (var payment in order.Payments)
+                        {
+                            <article class="payment-item">
+                                <div class="payment-head">
+                                    <strong>@payment.Amount</strong>
+                                    <span>@payment.PaidAtUtc.ToString("yyyy-MM-dd HH:mm")</span>
+                                </div>
+                                @if (!string.IsNullOrWhiteSpace(payment.Note))
+                                {
+                                    <p class="muted">@payment.Note</p>
+                                }
+                            </article>
+                        }
+                    </div>
+                }
+            </section>
+        </div>
+    }
+</section>
+
+@code {
+    [Parameter]
+    public Guid OrderId { get; set; }
+
+    [SupplyParameterFromQuery(Name = "apiBaseUrl")]
+    private string? PrefillApiBaseUrl { get; set; }
+
+    private string _apiBaseUrl = WorkspaceSettingsService.DefaultApiBaseUrl;
+    private bool _isLoading;
+    private bool _isSubmittingPayment;
+    private bool _isTransitioningStatus;
+    private bool _isFeedbackError;
+    private string? _feedbackMessage;
+    private decimal? _paymentAmount;
+    private string? _paymentNote;
+    private OrderWorkspaceDetailResult? _detail;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _apiBaseUrl = WorkspaceSettings.ApiBaseUrl;
+
+        if (!string.IsNullOrWhiteSpace(PrefillApiBaseUrl))
+        {
+            WorkspaceSettings.ApplyApiBaseUrlOverride(PrefillApiBaseUrl);
+            _apiBaseUrl = WorkspaceSettings.ApiBaseUrl;
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _isLoading = true;
+        _feedbackMessage = null;
+        _isFeedbackError = false;
+
+        _detail = await OrderWorklistService.GetDetailAsync(_apiBaseUrl, OrderId);
+        _isLoading = false;
+
+        if (!_detail.IsSuccess)
+        {
+            _feedbackMessage = _detail.ErrorMessage;
+            _isFeedbackError = true;
+            return;
+        }
+
+        _paymentAmount = _detail.Order?.BalanceDue > 0m ? _detail.Order.BalanceDue : null;
+        _paymentNote = null;
+    }
+
+    private async Task SubmitPaymentAsync()
+    {
+        if (_detail?.Order is null)
+        {
+            return;
+        }
+
+        if (_paymentAmount is null || _paymentAmount <= 0m)
+        {
+            _feedbackMessage = "Payment amount must be greater than zero.";
+            _isFeedbackError = true;
+            return;
+        }
+
+        if (_paymentAmount > _detail.Order.BalanceDue)
+        {
+            _feedbackMessage = "Payment cannot exceed the current balance due.";
+            _isFeedbackError = true;
+            return;
+        }
+
+        _isSubmittingPayment = true;
+        await InvokeAsync(StateHasChanged);
+        await Task.Yield();
+        var result = await OrderWorklistService.AddPaymentAsync(
+            _apiBaseUrl,
+            _detail.Order.OrderId,
+            _paymentAmount.Value,
+            _paymentNote);
+        _isSubmittingPayment = false;
+
+        if (!result.IsSuccess)
+        {
+            _feedbackMessage = result.ErrorMessage;
+            _isFeedbackError = true;
+            return;
+        }
+
+        _feedbackMessage = "Payment recorded successfully.";
+        _isFeedbackError = false;
+        await LoadAsync();
+    }
+
+    private async Task AdvanceStatusAsync()
+    {
+        if (_detail?.Order is null)
+        {
+            return;
+        }
+
+        var nextStatus = GetNextStatus(_detail.Order.Status);
+        if (nextStatus is null)
+        {
+            return;
+        }
+
+        _isTransitioningStatus = true;
+        var result = await OrderWorklistService.TransitionStatusAsync(
+            _apiBaseUrl,
+            _detail.Order.OrderId,
+            nextStatus);
+        _isTransitioningStatus = false;
+
+        if (!result.IsSuccess)
+        {
+            _feedbackMessage = result.ErrorMessage;
+            _isFeedbackError = true;
+            return;
+        }
+
+        _feedbackMessage = $"Order advanced to {FormatStatus(nextStatus)}.";
+        _isFeedbackError = false;
+        await LoadAsync();
+    }
+
+    private string BuildCustomerLink()
+    {
+        var customerId = _detail?.Order?.CustomerId;
+        return customerId.HasValue
+            ? $"/customers?customerId={Uri.EscapeDataString(customerId.Value.ToString())}"
+            : "/customers";
+    }
+
+    private string GetFeedbackClass()
+    {
+        return _isFeedbackError ? "feedback error" : "feedback";
+    }
+
+    private static string FormatStatus(string status)
+    {
+        if (string.IsNullOrWhiteSpace(status))
+        {
+            return "Unknown";
+        }
+
+        return string.Concat(status.Select((character, index) =>
+            index > 0 && char.IsUpper(character) ? $" {character}" : character.ToString()));
+    }
+
+    private static string? GetNextStatus(string status)
+    {
+        return status switch
+        {
+            "New" => "InProgress",
+            "InProgress" => "TrialFitting",
+            "TrialFitting" => "Rework",
+            "Rework" => "Ready",
+            "Ready" => "Delivered",
+            _ => null,
+        };
+    }
+
+    private static bool TryReadMeasurements(string json, out IReadOnlyList<KeyValuePair<string, decimal>> measurements)
+    {
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<Dictionary<string, decimal>>(json) ?? [];
+            measurements = parsed
+                .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            return true;
+        }
+        catch (JsonException)
+        {
+            measurements = [];
+            return false;
+        }
+    }
+}
+
+<style>
+    .order-detail-shell {
+        display: grid;
+        gap: 1.1rem;
+    }
+
+    .detail-header,
+    .toolbar-actions,
+    .payment-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 1rem;
+    }
+
+    .detail-header {
+        padding: 1.25rem 1.35rem;
+        border: 1px solid #d8e0e8;
+        border-radius: 8px;
+        background:
+            radial-gradient(circle at top right, rgba(15, 118, 110, 0.14), transparent 32%),
+            radial-gradient(circle at bottom left, rgba(201, 122, 50, 0.14), transparent 28%),
+            linear-gradient(180deg, #fffdf8, #ffffff);
+        box-shadow: 0 24px 50px -36px rgba(21, 33, 43, 0.45);
+    }
+
+    .header-copy h1 {
+        margin: 0;
+        font-size: clamp(1.5rem, 3vw, 2.2rem);
+        letter-spacing: -0.03em;
+    }
+
+    .header-copy p:last-child {
+        color: #5f7183;
+        max-width: 38rem;
+        line-height: 1.55;
+    }
+
+    .eyebrow {
+        margin: 0 0 0.45rem;
+        color: #c97a32;
+        font-size: 0.76rem;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+    }
+
+    .toolbar-card,
+    .detail-card {
+        border: 1px solid #d8e0e8;
+        border-radius: 8px;
+        padding: 1rem;
+        background: rgba(255, 255, 255, 0.92);
+        box-shadow: 0 20px 42px -34px rgba(21, 33, 43, 0.35);
+    }
+
+    .detail-grid {
+        display: grid;
+        gap: 1rem;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    }
+
+    .action-stack,
+    .payment-entry {
+        display: grid;
+        gap: 0.75rem;
+        margin-top: 1rem;
+    }
+
+    .summary-head {
+        display: grid;
+        gap: 0.7rem;
+        margin-bottom: 0.6rem;
+    }
+
+    .summary-head h2,
+    .summary-head p {
+        margin-top: 0;
+    }
+
+    .status-action-panel {
+        display: flex;
+        justify-content: flex-start;
+        min-width: 0;
+    }
+
+    .status-button {
+        box-shadow: 0 10px 20px -16px rgba(15, 118, 110, 0.95);
+        width: fit-content;
+        max-width: 100%;
+        padding: 0.56rem 0.78rem;
+        font-size: 0.86rem;
+        line-height: 1.2;
+        text-align: center;
+        white-space: normal;
+    }
+
+    .measurement-list {
+        display: grid;
+        gap: 0.5rem;
+        margin: 0;
+    }
+
+    .measurement-list div {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        padding-bottom: 0.35rem;
+        border-bottom: 1px solid #e5e7eb;
+    }
+
+    .measurement-list dt,
+    .measurement-list dd {
+        margin: 0;
+    }
+
+    .payment-list {
+        display: grid;
+        gap: 0.75rem;
+    }
+
+    .payment-item {
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 0.85rem;
+        background: linear-gradient(180deg, #fbfcfe, #f7fafc);
+    }
+
+    .ghost-link,
+    button {
+        border: none;
+        border-radius: 4px;
+        padding: 0.78rem 1rem;
+        background: #e6edf2;
+        color: #0f172a;
+        text-decoration: none;
+        cursor: pointer;
+        font-weight: 700;
+    }
+
+    .primary-button {
+        background: #0f766e;
+        color: #ffffff;
+    }
+
+    label {
+        display: grid;
+        gap: 0.35rem;
+        font-weight: 600;
+    }
+
+    input {
+        border: 1px solid #cbd5e1;
+        border-radius: 4px;
+        padding: 0.7rem 0.8rem;
+        background: #fcfdff;
+    }
+
+    .feedback {
+        margin: 0;
+        padding: 0.75rem;
+        border-radius: 8px;
+        background: #ecfeff;
+        color: #115e59;
+    }
+
+    .feedback.error {
+        background: #fef2f2;
+        color: #991b1b;
+    }
+
+    .muted {
+        color: #64748b;
+    }
+
+    .json-box {
+        overflow: auto;
+        padding: 0.75rem;
+        border-radius: 8px;
+        background: #0f172a;
+        color: #e2e8f0;
+    }
+
+    @@media (max-width: 720px) {
+        .detail-header,
+        .toolbar-actions,
+        .payment-head,
+        .summary-head {
+            flex-direction: column;
+            align-items: flex-start;
+        }
+
+        .status-action-panel {
+            justify-content: flex-start;
+        }
+    }
+</style>

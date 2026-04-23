@@ -1,0 +1,28 @@
+@inject STailor.UI.Rcl.Services.WorkspaceSettingsService WorkspaceSettings
+@inherits LayoutComponentBase
+
+<div class="app-shell">
+    <aside class="sidebar">
+        <div class="brand-block">
+            <p class="eyebrow">Browser Workspace</p>
+            <h1>@WorkspaceSettings.ProductName</h1>
+            <p class="brand-copy">Shared browser workspace for daily tailoring operations, customer history, reminders, and migration tools.</p>
+        </div>
+
+        <nav class="nav-stack">
+            <a href="/">Dashboard</a>
+            <a href="/orders/new">New Order</a>
+            <a href="/customers">Customers</a>
+            <a href="/orders/board">Orders Board</a>
+            <a href="/money">Payments</a>
+            <a href="/reports">Reports</a>
+            <a href="/orders/reminders">Reminders</a>
+            <a href="/communications/whatsapp">WhatsApp Updates</a>
+            <a href="/settings">Settings</a>
+        </nav>
+    </aside>
+
+    <main class="content">
+        @Body
+    </main>
+</div>

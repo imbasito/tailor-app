@@ -1,0 +1,63 @@
+@implements IDisposable
+@inject STailor.UI.Rcl.Services.WorkspaceSettingsService WorkspaceSettings
+<div class="brand-block">
+    <a class="brand-mark" href="/">
+        @if (HasLogo)
+        {
+            <img class="brand-logo" src="@WorkspaceSettings.LogoDataUrl" alt="Shop logo" />
+        }
+        <span class="brand-copy">
+            <strong>@WorkspaceSettings.ProductName</strong>
+            <span>Desktop tailor workspace</span>
+        </span>
+    </a>
+</div>
+
+<nav class="nav-cluster">
+    <NavLink class="nav-link" href="/" Match="NavLinkMatch.All">
+        <span>Dashboard</span>
+    </NavLink>
+    <NavLink class="nav-link" href="/orders/new">
+        <span>New Order</span>
+    </NavLink>
+    <NavLink class="nav-link" href="/customers">
+        <span>Customers</span>
+    </NavLink>
+    <NavLink class="nav-link" href="/orders/board">
+        <span>Orders Board</span>
+    </NavLink>
+    <NavLink class="nav-link" href="/money">
+        <span>Payments</span>
+    </NavLink>
+    <NavLink class="nav-link" href="/reports">
+        <span>Reports</span>
+    </NavLink>
+    <NavLink class="nav-link" href="/orders/reminders">
+        <span>Reminders</span>
+    </NavLink>
+    <NavLink class="nav-link" href="/communications/whatsapp">
+        <span>WhatsApp Updates</span>
+    </NavLink>
+    <NavLink class="nav-link" href="/settings">
+        <span>Settings</span>
+    </NavLink>
+</nav>
+
+@code {
+    private bool HasLogo => !string.IsNullOrWhiteSpace(WorkspaceSettings.LogoDataUrl);
+
+    protected override void OnInitialized()
+    {
+        WorkspaceSettings.Changed += OnWorkspaceSettingsChanged;
+    }
+
+    private void OnWorkspaceSettingsChanged()
+    {
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        WorkspaceSettings.Changed -= OnWorkspaceSettingsChanged;
+    }
+}

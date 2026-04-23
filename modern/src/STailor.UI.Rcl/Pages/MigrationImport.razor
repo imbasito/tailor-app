@@ -1,0 +1,501 @@
+@page "/migration/import"
+@using STailor.Shared.Contracts.Migration
+@using STailor.UI.Rcl.Models
+@using STailor.UI.Rcl.Services
+@inject LegacyMigrationSubmissionService SubmissionService
+@inject WorkspaceSettingsService WorkspaceSettings
+
+<section class="migration-shell">
+    <header class="migration-header">
+        <h1>Migration Import Console</h1>
+        <p>Submit legacy customer and order batches, then review parity and issue summaries instantly.</p>
+    </header>
+
+    @if (_errors.Count > 0)
+    {
+        <div class="migration-errors" role="alert">
+            <strong>Import blocked:</strong>
+            <ul>
+                @foreach (var error in _errors)
+                {
+                    <li>@error</li>
+                }
+            </ul>
+        </div>
+    }
+
+    @if (_result?.IsSuccess == true && _result.Report is not null)
+    {
+        <section class="migration-report" role="status">
+            <div class="report-grid">
+                <article class="report-card">
+                    <h2>Input</h2>
+                    <p>Customers: @_result.Report.InputCustomerCount</p>
+                    <p>Orders: @_result.Report.InputOrderCount</p>
+                    <p>Filtered Customers: @_result.Report.FilteredCustomerCount</p>
+                    <p>Filtered Orders: @_result.Report.FilteredOrderCount</p>
+                </article>
+
+                <article class="report-card">
+                    <h2>Imported</h2>
+                    <p>Customers: @_result.Report.ImportedCustomerCount</p>
+                    <p>Orders: @_result.Report.ImportedOrderCount</p>
+                    <p>Skipped Inactive: @_result.Report.SkippedInactiveCustomerCount</p>
+                    <p>Skipped Closed: @_result.Report.SkippedClosedOrderCount</p>
+                </article>
+
+                <article class="report-card">
+                    <h2>Financial Parity</h2>
+                    <p>Source Charged: @_result.Report.SourceChargedTotal</p>
+                    <p>Imported Charged: @_result.Report.ImportedChargedTotal</p>
+                    <p>Source Paid: @_result.Report.SourcePaidTotal</p>
+                    <p>Imported Paid: @_result.Report.ImportedPaidTotal</p>
+                    <p>Imported Balance: @_result.Report.ImportedBalanceTotal</p>
+                </article>
+            </div>
+
+            <div class="parity-pill @GetParityClass(ChargedDelta, PaidDelta)">
+                @if (ChargedDelta == 0m && PaidDelta == 0m)
+                {
+                    <span>Parity status: totals are aligned.</span>
+                }
+                else
+                {
+                    <span>
+                        Parity status: charged delta @ChargedDelta, paid delta @PaidDelta.
+                    </span>
+                }
+            </div>
+
+            <section class="issues-panel">
+                <h2>Issues (@_result.Report.Issues.Count)</h2>
+                @if (_result.Report.Issues.Count == 0)
+                {
+                    <p class="issues-empty">No issues recorded by the migration service.</p>
+                }
+                else
+                {
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Entity</th>
+                                <th>Legacy Id</th>
+                                <th>Message</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var issue in _result.Report.Issues)
+                            {
+                                <tr>
+                                    <td>@issue.EntityType</td>
+                                    <td>@issue.LegacyId</td>
+                                    <td>@issue.Message</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                }
+            </section>
+        </section>
+    }
+
+    <div class="migration-form-grid">
+        <div class="checkbox-grid">
+            <label class="checkbox-item">
+                <input type="checkbox" @bind="_model.ImportInactiveCustomers" />
+                Include inactive customers
+            </label>
+            <label class="checkbox-item">
+                <input type="checkbox" @bind="_model.ImportClosedOrders" />
+                Include closed orders
+            </label>
+        </div>
+
+        <label class="full-width">
+            Customers JSON Array
+            <textarea rows="9" @bind="_model.CustomersJson"></textarea>
+        </label>
+
+        <label class="full-width">
+            Orders JSON Array
+            <textarea rows="9" @bind="_model.OrdersJson"></textarea>
+        </label>
+    </div>
+
+    <footer class="migration-actions">
+        <button type="button" class="ghost" disabled="@_isSubmitting" @onclick="LoadSampleData">Load Sample</button>
+        <button type="button" class="ghost" disabled="@_isSubmitting" @onclick="ClearForm">Clear</button>
+        <button type="button" disabled="@_isSubmitting" @onclick="SubmitAsync">
+            @(_isSubmitting ? "Submitting..." : "Run Import")
+        </button>
+    </footer>
+</section>
+
+@code {
+    private readonly MigrationImportViewModel _model = new();
+    private readonly List<string> _errors = new();
+    private bool _isSubmitting;
+    private LegacyMigrationSubmissionResult? _result;
+
+    private decimal ChargedDelta =>
+        _result?.Report is null
+            ? 0m
+            : _result.Report.ImportedChargedTotal - _result.Report.SourceChargedTotal;
+
+    private decimal PaidDelta =>
+        _result?.Report is null
+            ? 0m
+            : _result.Report.ImportedPaidTotal - _result.Report.SourcePaidTotal;
+
+    private static string GetParityClass(decimal chargedDelta, decimal paidDelta)
+    {
+        return chargedDelta == 0m && paidDelta == 0m
+            ? "ok"
+            : "warning";
+    }
+
+    protected override void OnInitialized()
+    {
+        _model.ApiBaseUrl = WorkspaceSettings.ApiBaseUrl;
+    }
+
+    private Task SubmitAsync()
+    {
+        _errors.Clear();
+        _result = null;
+        _model.ApiBaseUrl = WorkspaceSettings.ApiBaseUrl;
+
+        return SubmitInternalAsync();
+    }
+
+    private async Task SubmitInternalAsync()
+    {
+        _isSubmitting = true;
+
+        try
+        {
+            _result = await SubmissionService.SubmitAsync(
+                new LegacyMigrationSubmissionRequest(
+                    _model.ApiBaseUrl,
+                    _model.CustomersJson,
+                    _model.OrdersJson,
+                    _model.ImportInactiveCustomers,
+                    _model.ImportClosedOrders));
+
+            if (!_result.IsSuccess)
+            {
+                _errors.Add(_result.ErrorMessage ?? "Migration import failed.");
+            }
+        }
+        finally
+        {
+            _isSubmitting = false;
+        }
+    }
+
+    private void LoadSampleData()
+    {
+        _errors.Clear();
+        _result = null;
+
+        _model.CustomersJson =
+                        @"[
+    {
+        ""legacyId"": 1,
+        ""fullName"": ""Amina Noor"",
+        ""phone"": ""+251900000001"",
+        ""city"": ""Harar"",
+        ""comment"": ""VIP"",
+        ""isActive"": true
+    },
+    {
+        ""legacyId"": 2,
+        ""fullName"": ""Samir Ali"",
+        ""phone"": ""+251900000002"",
+        ""city"": ""Dire Dawa"",
+        ""comment"": null,
+        ""isActive"": true
+    }
+]";
+
+        _model.OrdersJson =
+                        @"[
+    {
+        ""legacyId"": 101,
+        ""legacyCustomerId"": 1,
+        ""description"": ""Suit"",
+        ""recievedOn"": ""2026-04-10"",
+        ""amountCharged"": ""120"",
+        ""amountPaid"": ""20"",
+        ""collectingOn"": ""2026-04-18"",
+        ""isOpen"": true
+    },
+    {
+        ""legacyId"": 102,
+        ""legacyCustomerId"": 2,
+        ""description"": ""Shirt"",
+        ""recievedOn"": ""2026-04-11"",
+        ""amountCharged"": ""80"",
+        ""amountPaid"": ""10"",
+        ""collectingOn"": ""2026-04-19"",
+        ""isOpen"": true
+    }
+]";
+    }
+
+    private void ClearForm()
+    {
+        _errors.Clear();
+        _result = null;
+        _model.ApiBaseUrl = WorkspaceSettings.ApiBaseUrl;
+        _model.CustomersJson = "[]";
+        _model.OrdersJson = "[]";
+        _model.ImportInactiveCustomers = false;
+        _model.ImportClosedOrders = false;
+    }
+
+    private sealed class MigrationImportViewModel
+    {
+        public string ApiBaseUrl { get; set; } = "http://localhost:5064";
+
+        public string CustomersJson { get; set; } = "[]";
+
+        public string OrdersJson { get; set; } = "[]";
+
+        public bool ImportInactiveCustomers { get; set; }
+
+        public bool ImportClosedOrders { get; set; }
+    }
+}
+
+<style>
+    .migration-shell {
+        --ink: #1b2a33;
+        --surface: #f9f4ea;
+        --panel: #ffffff;
+        --line: #d9cbb4;
+        --accent: #0b6e4f;
+        --accent-soft: #dff1eb;
+        --warn: #a65a00;
+        --warn-soft: #fff2e4;
+        --danger: #9f2a2a;
+        --danger-soft: #fff1f1;
+        font-family: "Avenir Next", "Trebuchet MS", sans-serif;
+        color: var(--ink);
+        padding: 1.25rem;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+        background:
+            radial-gradient(circle at top right, rgba(11, 110, 79, 0.11), transparent 38%),
+            radial-gradient(circle at left center, rgba(166, 90, 0, 0.08), transparent 45%),
+            var(--surface);
+        box-shadow: 0 14px 34px -24px rgba(27, 42, 51, 0.85);
+    }
+
+    .migration-header h1 {
+        margin: 0;
+        font-size: clamp(1.35rem, 2.7vw, 2rem);
+        letter-spacing: 0.02em;
+    }
+
+    .migration-header p {
+        margin: 0.5rem 0 0;
+        color: #3b4a55;
+    }
+
+    .migration-errors {
+        margin-top: 1rem;
+        background: var(--danger-soft);
+        border: 1px solid #efbcbc;
+        border-radius: 8px;
+        color: var(--danger);
+        padding: 0.8rem 1rem;
+    }
+
+    .migration-errors ul {
+        margin: 0.5rem 0 0;
+    }
+
+    .migration-form-grid {
+        margin-top: 1rem;
+        display: grid;
+        gap: 0.85rem;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    }
+
+    label {
+        display: grid;
+        gap: 0.35rem;
+        font-size: 0.9rem;
+        color: #334651;
+    }
+
+    .full-width {
+        grid-column: 1 / -1;
+    }
+
+    .checkbox-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 0.45rem;
+        align-content: start;
+        padding-top: 1.2rem;
+    }
+
+    .checkbox-item {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.9rem;
+    }
+
+    input,
+    textarea,
+    button {
+        font: inherit;
+    }
+
+    input[type="url"],
+    textarea {
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        background: var(--panel);
+        padding: 0.58rem 0.65rem;
+    }
+
+    input[type="url"]:focus,
+    textarea:focus {
+        outline: 2px solid rgba(11, 110, 79, 0.28);
+        border-color: var(--accent);
+    }
+
+    textarea {
+        font-family: "Consolas", "Courier New", monospace;
+        line-height: 1.45;
+        resize: vertical;
+    }
+
+    .migration-actions {
+        margin-top: 1rem;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.65rem;
+    }
+
+    button {
+        border: none;
+        border-radius: 4px;
+        padding: 0.62rem 0.95rem;
+        font-weight: 700;
+        cursor: pointer;
+        color: #fff;
+        background: linear-gradient(145deg, #0b6e4f, #0e7b57);
+    }
+
+    button.ghost {
+        border: 1px solid var(--line);
+        color: var(--accent);
+        background: var(--panel);
+    }
+
+    button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+    }
+
+    .migration-report {
+        margin-top: 1.05rem;
+        border-top: 1px dashed var(--line);
+        padding-top: 1.1rem;
+    }
+
+    .report-grid {
+        display: grid;
+        gap: 0.8rem;
+        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    }
+
+    .report-card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 0.75rem 0.9rem;
+    }
+
+    .report-card h2 {
+        margin: 0;
+        font-size: 1rem;
+    }
+
+    .report-card p {
+        margin: 0.35rem 0;
+    }
+
+    .parity-pill {
+        margin-top: 0.9rem;
+        border-radius: 999px;
+        padding: 0.42rem 0.85rem;
+        font-weight: 700;
+        display: inline-block;
+    }
+
+    .parity-pill.ok {
+        color: var(--accent);
+        background: var(--accent-soft);
+        border: 1px solid #b6dfd2;
+    }
+
+    .parity-pill.warning {
+        color: var(--warn);
+        background: var(--warn-soft);
+        border: 1px solid #f0cfaa;
+    }
+
+    .issues-panel {
+        margin-top: 1rem;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 0.8rem;
+        overflow-x: auto;
+    }
+
+    .issues-panel h2 {
+        margin: 0 0 0.55rem;
+        font-size: 1rem;
+    }
+
+    .issues-empty {
+        margin: 0;
+        color: #52616d;
+    }
+
+    table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+
+    th,
+    td {
+        text-align: left;
+        padding: 0.45rem;
+        border-bottom: 1px solid #ece2d3;
+        vertical-align: top;
+        font-size: 0.88rem;
+    }
+
+    th {
+        font-weight: 700;
+        color: #35515f;
+    }
+
+    @@media (max-width: 640px) {
+        .migration-shell {
+            padding: 1rem;
+        }
+
+        .migration-actions button {
+            flex: 1 1 100%;
+        }
+    }
+</style>

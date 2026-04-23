@@ -1,0 +1,230 @@
+@page "/reports/daily-orders"
+@inject ReportingServiceClient ReportingService
+@inject NavigationManager Navigation
+
+<PageTitle>Daily Orders Report - STailor</PageTitle>
+
+<div class="container-fluid py-4">
+    <h2>Daily Orders Report</h2>
+
+    <div class="row mb-4">
+        <div class="col-md-4">
+            <label class="form-label">Report Date</label>
+            <input type="date" class="form-control" @bind="_selectedDate" @bind:after="LoadReportAsync" />
+        </div>
+        <div class="col-md-4 d-flex align-items-end">
+            <button class="btn btn-outline-secondary me-2" @onclick="GoToPreviousDay">
+                <i class="bi bi-chevron-left"></i> Previous
+            </button>
+            <button class="btn btn-outline-secondary me-2" @onclick="GoToToday">Today</button>
+            <button class="btn btn-outline-secondary" @onclick="GoToNextDay">
+                Next <i class="bi bi-chevron-right"></i>
+            </button>
+        </div>
+        <div class="col-md-4 d-flex align-items-end justify-content-end">
+            <button class="btn btn-primary" @onclick="PrintReport">
+                <i class="bi bi-printer"></i> Print
+            </button>
+        </div>
+    </div>
+
+    @if (_isLoading)
+    {
+        <div class="text-center py-5">
+            <div class="spinner-border" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+        </div>
+    }
+    else if (_report != null)
+    {
+        <!-- Summary Cards -->
+        <div class="row mb-4">
+            <div class="col-md-3">
+                <div class="card bg-primary text-white">
+                    <div class="card-body">
+                        <h6 class="card-title">Orders Received</h6>
+                        <h3>@_report.TotalOrdersReceived</h3>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-success text-white">
+                    <div class="card-body">
+                        <h6 class="card-title">Total Charged</h6>
+                        <h3>@FormatCurrency(_report.TotalAmountCharged)</h3>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-info text-white">
+                    <div class="card-body">
+                        <h6 class="card-title">Total Paid</h6>
+                        <h3>@FormatCurrency(_report.TotalAmountPaid)</h3>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-warning text-dark">
+                    <div class="card-body">
+                        <h6 class="card-title">Total Balance</h6>
+                        <h3>@FormatCurrency(_report.TotalAmountCharged - _report.TotalAmountPaid)</h3>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        @if (_report.ByGarmentType.Any())
+        {
+            <div class="row mb-4">
+                <div class="col-md-12">
+                    <h5>By Garment Type</h5>
+                    <div class="table-responsive">
+                        <table class="table table-sm">
+                            <thead>
+                                <tr>
+                                    <th>Garment Type</th>
+                                    <th class="text-center">Count</th>
+                                    <th class="text-end">Total Amount</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var item in _report.ByGarmentType)
+                                {
+                                    <tr>
+                                        <td>@item.GarmentType</td>
+                                        <td class="text-center">@item.Count</td>
+                                        <td class="text-end">@FormatCurrency(item.TotalAmount)</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @if (_report.Orders.Any())
+        {
+            <div class="row">
+                <div class="col-md-12">
+                    <h5>Order Details</h5>
+                    <div class="table-responsive">
+                        <table class="table table-hover">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Order #</th>
+                                    <th>Customer</th>
+                                    <th>Phone</th>
+                                    <th>Type</th>
+                                    <th class="text-end">Charged</th>
+                                    <th class="text-end">Paid</th>
+                                    <th class="text-end">Balance</th>
+                                    <th>Status</th>
+                                    <th>Delivery</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var order in _report.Orders)
+                                {
+                                    <tr>
+                                        <td>@order.OrderNumber</td>
+                                        <td>@order.CustomerName</td>
+                                        <td>@order.CustomerPhone</td>
+                                        <td>@order.GarmentType</td>
+                                        <td class="text-end">@FormatCurrency(order.AmountCharged)</td>
+                                        <td class="text-end">@FormatCurrency(order.AmountPaid)</td>
+                                        <td class="text-end">
+                                            <span class="@(order.BalanceDue > 0 ? "text-danger" : "text-success")">
+                                                @FormatCurrency(order.BalanceDue)
+                                            </span>
+                                        </td>
+                                        <td>
+                                            <span class="badge @GetStatusBadgeClass(order.Status)">
+                                                @order.Status
+                                            </span>
+                                        </td>
+                                        <td>@(order.DeliveryDate?.ToString("MMM dd") ?? "-")</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        }
+        else
+        {
+            <div class="alert alert-info">
+                No orders received on @_selectedDate.ToString("MMMM dd, yyyy").
+            </div>
+        }
+    }
+</div>
+
+@code {
+    private DateTime _selectedDate = DateTime.Today;
+    private DailyOrdersReportDto? _report;
+    private bool _isLoading;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadReportAsync();
+    }
+
+    private async Task LoadReportAsync()
+    {
+        _isLoading = true;
+        try
+        {
+            _report = await ReportingService.GetDailyOrdersReportAsync(_selectedDate);
+        }
+        finally
+        {
+            _isLoading = false;
+        }
+    }
+
+    private void GoToPreviousDay()
+    {
+        _selectedDate = _selectedDate.AddDays(-1);
+        _ = LoadReportAsync();
+    }
+
+    private void GoToToday()
+    {
+        _selectedDate = DateTime.Today;
+        _ = LoadReportAsync();
+    }
+
+    private void GoToNextDay()
+    {
+        _selectedDate = _selectedDate.AddDays(1);
+        _ = LoadReportAsync();
+    }
+
+    private void PrintReport()
+    {
+        // Implement print functionality
+        Navigation.NavigateTo("javascript:window.print()");
+    }
+
+    private string FormatCurrency(decimal amount)
+    {
+        return $"PKR {amount:N0}";
+    }
+
+    private string GetStatusBadgeClass(string status)
+    {
+        return status?.ToLower() switch
+        {
+            "new" => "bg-secondary",
+            "inprogress" => "bg-primary",
+            "trialfitting" => "bg-info",
+            "rework" => "bg-warning",
+            "ready" => "bg-success",
+            "delivered" => "bg-dark",
+            _ => "bg-secondary"
+        };
+    }
+}

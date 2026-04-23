@@ -1,0 +1,363 @@
+@page "/orders/reminders"
+@using Microsoft.AspNetCore.Components
+@using STailor.Shared.Contracts.Orders
+@using STailor.UI.Rcl.Services
+@inject OrderReminderWorklistService WorklistService
+@inject WorkspaceSettingsService WorkspaceSettings
+
+<section class="reminders-shell">
+    <header class="reminders-header">
+        <h1>Order Reminder Worklist</h1>
+        <p>Due and balance reminders across all orders, with one-tap WhatsApp actions.</p>
+    </header>
+
+    <div class="filters-grid">
+        <label>
+            Days Ahead
+            <input type="number" min="0" max="365" @bind="_daysAhead" />
+        </label>
+
+        <label>
+            Max Items
+            <input type="number" min="1" max="500" @bind="_maxItems" />
+        </label>
+    </div>
+
+    <div class="actions-row">
+        <button type="button" disabled="@_isLoading" @onclick="LoadAsync">
+            @(_isLoading ? "Loading..." : "Load Reminder Candidates")
+        </button>
+        @if (_hasLoaded)
+        {
+            <span class="meta">Last loaded: @_lastLoadedAtUtc.ToString("yyyy-MM-dd HH:mm 'UTC'")</span>
+        }
+    </div>
+
+    @if (!string.IsNullOrWhiteSpace(_errorMessage))
+    {
+        <div class="error-box" role="alert">@_errorMessage</div>
+    }
+
+    @if (_items.Count == 0 && _hasLoaded && string.IsNullOrWhiteSpace(_errorMessage))
+    {
+        <div class="empty-box" role="status">
+            No due outstanding orders matched your criteria.
+        </div>
+    }
+
+    @if (_items.Count > 0)
+    {
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Customer</th>
+                        <th>Phone</th>
+                        <th>Garment</th>
+                        <th>Status</th>
+                        <th>Due Date</th>
+                        <th>Balance Due</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var item in _items)
+                    {
+                        <tr>
+                            <td>@item.CustomerName</td>
+                            <td>@item.PhoneNumber</td>
+                            <td>@item.GarmentType</td>
+                            <td>@item.Status</td>
+                            <td>@item.DueAtUtc.ToString("yyyy-MM-dd")</td>
+                            <td>@item.BalanceDue</td>
+                            <td class="action-cell">
+                        <a class="action-link" href="@BuildReminderLink(item, useDueBalanceTemplate: true)"><span class="whatsapp-glyph" aria-hidden="true"></span>Due and Balance</a>
+                        <a class="action-link" href="@BuildReminderLink(item, useDueBalanceTemplate: false)"><span class="whatsapp-glyph" aria-hidden="true"></span>Status Update</a>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</section>
+
+@code {
+    [SupplyParameterFromQuery(Name = "apiBaseUrl")]
+    private string? ApiBaseUrlQuery { get; set; }
+
+    [SupplyParameterFromQuery(Name = "daysAhead")]
+    private int? DaysAheadQuery { get; set; }
+
+    [SupplyParameterFromQuery(Name = "maxItems")]
+    private int? MaxItemsQuery { get; set; }
+
+    private string _apiBaseUrl = WorkspaceSettingsService.DefaultApiBaseUrl;
+    private int _daysAhead = 7;
+    private int _maxItems = 50;
+    private bool _isLoading;
+    private bool _hasLoaded;
+    private DateTimeOffset _lastLoadedAtUtc;
+    private string? _errorMessage;
+    private List<OrderReminderDto> _items = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        ApplyQueryState();
+        await LoadAsync();
+    }
+
+    protected override Task OnParametersSetAsync()
+    {
+        ApplyQueryState();
+        return Task.CompletedTask;
+    }
+
+    private async Task LoadAsync()
+    {
+        _isLoading = true;
+        _errorMessage = null;
+
+        try
+        {
+            var result = await WorklistService.GetAsync(_apiBaseUrl, _daysAhead, _maxItems);
+            _hasLoaded = true;
+            _lastLoadedAtUtc = DateTimeOffset.UtcNow;
+
+            if (!result.IsSuccess)
+            {
+                _items = [];
+                _errorMessage = result.ErrorMessage ?? "Unable to load reminder candidates.";
+                return;
+            }
+
+            _items = result.Items
+                .OrderBy(item => item.DueAtUtc)
+                .ThenBy(item => item.CustomerName)
+                .ToList();
+        }
+        finally
+        {
+            _isLoading = false;
+        }
+    }
+
+    private static string BuildReminderLink(OrderReminderDto item, bool useDueBalanceTemplate)
+    {
+        return WhatsAppPrefillLinkBuilder.BuildFromReminderCandidate(item, useDueBalanceTemplate);
+    }
+
+    private void ApplyQueryState()
+    {
+        _apiBaseUrl = WorkspaceSettings.ApiBaseUrl;
+
+        if (!string.IsNullOrWhiteSpace(ApiBaseUrlQuery))
+        {
+            WorkspaceSettings.ApplyApiBaseUrlOverride(ApiBaseUrlQuery);
+            _apiBaseUrl = WorkspaceSettings.ApiBaseUrl;
+        }
+
+        if (DaysAheadQuery.HasValue)
+        {
+            _daysAhead = Math.Clamp(DaysAheadQuery.Value, 0, 365);
+        }
+
+        if (MaxItemsQuery.HasValue)
+        {
+            _maxItems = Math.Clamp(MaxItemsQuery.Value, 1, 500);
+        }
+    }
+}
+
+<style>
+    .reminders-shell {
+        --ink: #1a2b35;
+        --surface: #f8f9fc;
+        --line: #d4dbe3;
+        --accent: #0b6e4f;
+        --accent-soft: #e4f5ee;
+        --danger: #b42318;
+        font-family: "Avenir Next", "Trebuchet MS", sans-serif;
+        color: var(--ink);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 1.2rem;
+        background:
+            radial-gradient(circle at 15% 15%, rgba(11, 110, 79, 0.1), transparent 35%),
+            var(--surface);
+        box-shadow: 0 16px 34px -26px rgba(26, 43, 53, 0.75);
+    }
+
+    .reminders-header h1 {
+        margin: 0;
+        font-size: clamp(1.35rem, 2.7vw, 2rem);
+    }
+
+    .reminders-header p {
+        margin-top: 0.45rem;
+        color: #3a4b58;
+    }
+
+    .filters-grid {
+        margin-top: 1rem;
+        display: grid;
+        gap: 0.85rem;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+
+    label {
+        display: grid;
+        gap: 0.35rem;
+        font-size: 0.9rem;
+        color: #2f4350;
+    }
+
+    input,
+    button,
+    table {
+        font: inherit;
+    }
+
+    input {
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        padding: 0.55rem 0.65rem;
+        background: #fff;
+    }
+
+    input:focus {
+        outline: 2px solid rgba(11, 110, 79, 0.2);
+        border-color: var(--accent);
+    }
+
+    .actions-row {
+        margin-top: 0.95rem;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.6rem;
+    }
+
+    .meta {
+        color: #465968;
+        font-size: 0.85rem;
+    }
+
+    button {
+        border: none;
+        border-radius: 4px;
+        padding: 0.6rem 0.95rem;
+        background: var(--accent);
+        color: #fff;
+        font-weight: 700;
+        cursor: pointer;
+    }
+
+    button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+    }
+
+    .error-box,
+    .empty-box {
+        margin-top: 1rem;
+        border-radius: 8px;
+        padding: 0.7rem 0.9rem;
+    }
+
+    .error-box {
+        border: 1px solid #f4c8c1;
+        background: #fff1ef;
+        color: var(--danger);
+    }
+
+    .empty-box {
+        border: 1px solid #cce7d8;
+        background: #f2faf6;
+        color: #1f6b4d;
+    }
+
+    .table-wrap {
+        margin-top: 1rem;
+        overflow-x: auto;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fff;
+    }
+
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        min-width: 780px;
+    }
+
+    th,
+    td {
+        text-align: left;
+        padding: 0.65rem;
+        border-bottom: 1px solid #eef2f5;
+        vertical-align: top;
+        font-size: 0.88rem;
+    }
+
+    th {
+        background: #f4f8fb;
+        color: #324857;
+        font-weight: 700;
+    }
+
+    .action-cell {
+        display: grid;
+        gap: 0.35rem;
+    }
+
+    .action-link {
+        display: inline-flex;
+        align-items: center;
+        text-decoration: none;
+        border: 1px solid #b7d9c9;
+        border-radius: 4px;
+        padding: 0.35rem 0.55rem;
+        color: #0b5b38;
+        background: #f5fbf8;
+        font-weight: 700;
+        width: fit-content;
+    }
+
+    .action-link:hover {
+        background: var(--accent-soft);
+    }
+
+    .whatsapp-glyph {
+        display: inline-grid;
+        place-items: center;
+        width: 1rem;
+        height: 1rem;
+        margin-right: 0.35rem;
+        border-radius: 999px;
+        background: #25d366;
+        vertical-align: -0.12rem;
+    }
+
+    .whatsapp-glyph::before {
+        content: "";
+        width: 0.42rem;
+        height: 0.42rem;
+        border: 2px solid #ffffff;
+        border-top-color: transparent;
+        border-left-color: transparent;
+        border-radius: 2px;
+        transform: rotate(-35deg);
+    }
+
+    @@media (max-width: 760px) {
+        .reminders-shell {
+            padding: 0.95rem;
+        }
+
+        .actions-row {
+            flex-direction: column;
+            align-items: stretch;
+        }
+    }
+</style>

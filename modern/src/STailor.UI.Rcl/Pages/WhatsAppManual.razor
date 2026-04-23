@@ -1,0 +1,781 @@
+@page "/communications/whatsapp"
+@page "/communications/reminder"
+@using System.Globalization
+@using Microsoft.AspNetCore.Components
+@using Microsoft.AspNetCore.Components.Web
+@using STailor.Shared.Contracts.Orders
+@using STailor.UI.Rcl.Services
+@inject NavigationManager NavigationManager
+@inject OrderWorklistService OrderWorklistService
+@inject WhatsAppDeepLinkService WhatsAppService
+@inject WhatsAppMessageComposer MessageComposer
+@inject WorkspaceSettingsService WorkspaceSettings
+
+<section class="whatsapp-shell">
+    <header class="whatsapp-header">
+        <h1>WhatsApp Updates</h1>
+        <p>Search by order id, customer name, or phone number and the message workspace will pull the latest customer, status, due date, and balance automatically.</p>
+    </header>
+
+    @if (!string.IsNullOrWhiteSpace(_feedbackMessage))
+    {
+        <div class="feedback @(_isFeedbackSuccess ? "ok" : "error")" role="status">
+            @_feedbackMessage
+        </div>
+    }
+
+    <div class="whatsapp-toolbar">
+        <label class="order-input">
+            Order Search
+            <div class="order-input-row">
+                <input type="text" @bind="_orderReference" @onkeydown="HandleOrderSearchKeyDown" placeholder="Order id, customer name, or phone" />
+                <button type="button" class="ghost" disabled="@(_isLoadingOrder || _isOpening)" @onclick="SearchOrderAsync">
+                    @(_isLoadingOrder ? "Searching..." : "Search Order")
+                </button>
+            </div>
+        </label>
+
+        <div class="template-picker" role="tablist" aria-label="Message template">
+            <button type="button"
+                    class="@GetTemplateButtonClass(useDueBalanceTemplate: false)"
+                    disabled="@(_isOpening || _isLoadingOrder)"
+                    @onclick="() => SelectTemplate(useDueBalanceTemplate: false)">
+                <span class="whatsapp-glyph" aria-hidden="true"></span>Status Update
+            </button>
+            <button type="button"
+                    class="@GetTemplateButtonClass(useDueBalanceTemplate: true)"
+                    disabled="@(_isOpening || _isLoadingOrder)"
+                    @onclick="() => SelectTemplate(useDueBalanceTemplate: true)">
+                <span class="whatsapp-glyph" aria-hidden="true"></span>Due & Balance
+            </button>
+        </div>
+    </div>
+
+    @if (_searchResults.Count > 1)
+    {
+        <div class="search-results">
+            <div class="results-header">
+                <strong>@_searchResults.Count matches found</strong>
+                <span>Select one order to load its live message details.</span>
+            </div>
+
+            @foreach (var item in _searchResults)
+            {
+                <button type="button" class="search-result-card" disabled="@(_isLoadingOrder || _isOpening)" @onclick="() => LoadSelectedOrderAsync(item.OrderId)">
+                    <div>
+                        <strong>@item.CustomerName</strong>
+                        <span>@item.PhoneNumber</span>
+                    </div>
+                    <div>
+                        <strong>@item.OrderId.ToString()[..8]</strong>
+                        <span>@FormatStatusLabel(item.Status) · Due @FormatDueDate(item.DueAtUtc)</span>
+                    </div>
+                </button>
+            }
+        </div>
+    }
+
+    @if (_loadedOrder is not null)
+    {
+        <div class="order-summary">
+            <article>
+                <span>Customer</span>
+                <strong>@_loadedOrder.CustomerName</strong>
+                <small>@FormatOptional(_loadedOrder.City)</small>
+            </article>
+            <article>
+                <span>Phone</span>
+                <strong>@FormatOptional(_loadedOrder.PhoneNumber)</strong>
+                <small>@FormatOptional(_loadedOrder.GarmentType)</small>
+            </article>
+            <article>
+                <span>Status</span>
+                <strong>@FormatStatusLabel(_loadedOrder.Status)</strong>
+                <small>Due @FormatDueDate(_loadedOrder.DueAtUtc)</small>
+            </article>
+            <article>
+                <span>Balance</span>
+                <strong>@FormatCurrency(_loadedOrder.BalanceDue)</strong>
+                <small>Charged @FormatCurrency(_loadedOrder.AmountCharged)</small>
+            </article>
+        </div>
+    }
+    else
+    {
+        <div class="empty-state">
+            <strong>No order loaded yet.</strong>
+            <span>Search by order id, customer name, or phone to pull live order information into this message workspace.</span>
+        </div>
+    }
+
+    @if (_showManualPhoneField)
+    {
+        <div class="manual-phone-row">
+            <label>
+                Phone Number
+                <input type="tel" @bind="_phoneNumber" placeholder="+251900000001" />
+            </label>
+        </div>
+    }
+
+    <label class="full-width">
+        Message
+        <textarea rows="8" @bind="_message"></textarea>
+    </label>
+
+    <footer class="whatsapp-actions">
+        <button type="button" disabled="@(_isOpening || _isLoadingOrder)" @onclick="OpenWhatsAppAsync">
+            @(_isOpening ? "Opening..." : "Open WhatsApp")
+        </button>
+    </footer>
+</section>
+
+@code {
+    [Parameter]
+    [SupplyParameterFromQuery(Name = "phone")]
+    public string? QueryPhone { get; set; }
+
+    [Parameter]
+    [SupplyParameterFromQuery(Name = "customerName")]
+    public string? QueryCustomerName { get; set; }
+
+    [Parameter]
+    [SupplyParameterFromQuery(Name = "orderId")]
+    public string? QueryOrderId { get; set; }
+
+    [Parameter]
+    [SupplyParameterFromQuery(Name = "status")]
+    public string? QueryStatus { get; set; }
+
+    [Parameter]
+    [SupplyParameterFromQuery(Name = "dueAtUtc")]
+    public string? QueryDueAtUtc { get; set; }
+
+    [Parameter]
+    [SupplyParameterFromQuery(Name = "balanceDue")]
+    public string? QueryBalanceDue { get; set; }
+
+    [Parameter]
+    [SupplyParameterFromQuery(Name = "template")]
+    public string? QueryTemplate { get; set; }
+
+    [Parameter]
+    [SupplyParameterFromQuery(Name = "message")]
+    public string? QueryMessage { get; set; }
+
+    private string _phoneNumber = string.Empty;
+    private string _customerName = string.Empty;
+    private string _orderReference = string.Empty;
+    private string _status = "New";
+    private DateTime _dueDate = DateTime.UtcNow.Date.AddDays(7);
+    private decimal _balanceDue;
+    private string _message = string.Empty;
+    private bool _isOpening;
+    private bool _isLoadingOrder;
+    private bool _isFeedbackSuccess;
+    private bool _useDueBalanceTemplate;
+    private string? _feedbackMessage;
+    private string? _lastPrefillKey;
+    private OrderWorkspaceDetailDto? _loadedOrder;
+    private List<OrderWorklistItemDto> _searchResults = [];
+
+    protected override void OnInitialized()
+    {
+        _useDueBalanceTemplate = IsDueBalanceRoute();
+        RebuildMessage();
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        var prefillKey = string.Join(
+            "|",
+            QueryPhone,
+            QueryCustomerName,
+            QueryOrderId,
+            QueryStatus,
+            QueryDueAtUtc,
+            QueryBalanceDue,
+            QueryTemplate,
+            QueryMessage);
+
+        if (string.Equals(_lastPrefillKey, prefillKey, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _lastPrefillKey = prefillKey;
+        _useDueBalanceTemplate = IsDueBalanceRoute();
+
+        if (!string.IsNullOrWhiteSpace(QueryPhone))
+        {
+            _phoneNumber = QueryPhone.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(QueryCustomerName))
+        {
+            _customerName = QueryCustomerName.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(QueryOrderId))
+        {
+            _orderReference = QueryOrderId.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(QueryStatus))
+        {
+            _status = QueryStatus.Trim();
+        }
+
+        if (DateTimeOffset.TryParse(
+            QueryDueAtUtc,
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.RoundtripKind,
+            out var dueAtUtc))
+        {
+            _dueDate = dueAtUtc.UtcDateTime.Date;
+        }
+
+        if (decimal.TryParse(QueryBalanceDue, NumberStyles.Number, CultureInfo.InvariantCulture, out var parsedBalance))
+        {
+            _balanceDue = decimal.Round(Math.Max(0m, parsedBalance), 2, MidpointRounding.AwayFromZero);
+        }
+
+        if (!string.IsNullOrWhiteSpace(QueryOrderId))
+        {
+            _orderReference = QueryOrderId.Trim();
+            await SearchOrderAsync(showSuccessMessage: false);
+        }
+
+        if (!string.IsNullOrWhiteSpace(QueryMessage))
+        {
+            _message = QueryMessage.Trim();
+            _feedbackMessage = null;
+            return;
+        }
+
+        RebuildMessage();
+    }
+
+    private async Task SearchOrderAsync()
+    {
+        await SearchOrderAsync(showSuccessMessage: true);
+    }
+
+    private async Task HandleOrderSearchKeyDown(KeyboardEventArgs eventArgs)
+    {
+        if (!string.Equals(eventArgs.Key, "Enter", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        await SearchOrderAsync(showSuccessMessage: true);
+    }
+
+    private async Task SearchOrderAsync(bool showSuccessMessage)
+    {
+        _feedbackMessage = null;
+        _searchResults = [];
+
+        if (string.IsNullOrWhiteSpace(_orderReference))
+        {
+            _loadedOrder = null;
+            _isFeedbackSuccess = false;
+            _feedbackMessage = "Enter an order id, customer name, or phone number to search.";
+            RebuildMessage();
+            return;
+        }
+
+        _isLoadingOrder = true;
+
+        try
+        {
+            var searchText = _orderReference.Trim();
+
+            if (Guid.TryParse(searchText, out var orderId))
+            {
+                var loadedById = await TryLoadOrderByIdAsync(orderId, showSuccessMessage);
+                if (loadedById)
+                {
+                    return;
+                }
+            }
+
+            var worklist = await OrderWorklistService.GetAsync(
+                WorkspaceSettings.ApiBaseUrl,
+                includeDelivered: true,
+                maxItems: 12,
+                searchText: searchText);
+
+            if (!worklist.IsSuccess)
+            {
+                _loadedOrder = null;
+                _isFeedbackSuccess = false;
+                _feedbackMessage = worklist.ErrorMessage ?? "Unable to search orders.";
+                return;
+            }
+
+            _searchResults = worklist.Items.ToList();
+
+            if (_searchResults.Count == 0)
+            {
+                _loadedOrder = null;
+                _isFeedbackSuccess = false;
+                _feedbackMessage = "No matching order was found for that search.";
+                RebuildMessage();
+                return;
+            }
+
+            if (_searchResults.Count == 1)
+            {
+                await LoadSelectedOrderAsync(_searchResults[0].OrderId, showSuccessMessage);
+                return;
+            }
+
+            _loadedOrder = null;
+            _isFeedbackSuccess = true;
+            if (showSuccessMessage)
+            {
+                _feedbackMessage = "Multiple orders matched. Select one result to load live details.";
+            }
+        }
+        finally
+        {
+            _isLoadingOrder = false;
+        }
+    }
+
+    private async Task<bool> TryLoadOrderByIdAsync(Guid orderId, bool showSuccessMessage)
+    {
+        var result = await OrderWorklistService.GetDetailAsync(
+            WorkspaceSettings.ApiBaseUrl,
+            orderId);
+
+        if (!result.IsSuccess || result.Order is null)
+        {
+            return false;
+        }
+
+        ApplyLoadedOrder(result.Order);
+
+        if (showSuccessMessage)
+        {
+            _isFeedbackSuccess = true;
+            _feedbackMessage = "Order loaded. Message details are now using the latest order data.";
+        }
+
+        return true;
+    }
+
+    private Task LoadSelectedOrderAsync(Guid orderId)
+    {
+        return LoadSelectedOrderAsync(orderId, showSuccessMessage: true);
+    }
+
+    private async Task LoadSelectedOrderAsync(Guid orderId, bool showSuccessMessage)
+    {
+        _searchResults = [];
+
+        var loaded = await TryLoadOrderByIdAsync(orderId, showSuccessMessage);
+        if (!loaded)
+        {
+            _loadedOrder = null;
+            _isFeedbackSuccess = false;
+            _feedbackMessage = "Unable to load the selected order.";
+            RebuildMessage();
+        }
+    }
+
+    private void ApplyLoadedOrder(OrderWorkspaceDetailDto order)
+    {
+        _loadedOrder = order;
+        _orderReference = order.OrderId.ToString();
+        _phoneNumber = order.PhoneNumber;
+        _customerName = order.CustomerName;
+        _status = order.Status;
+        _dueDate = order.DueAtUtc.UtcDateTime.Date;
+        _balanceDue = decimal.Round(Math.Max(0m, order.BalanceDue), 2, MidpointRounding.AwayFromZero);
+        RebuildMessage();
+    }
+
+    private void SelectTemplate(bool useDueBalanceTemplate)
+    {
+        _useDueBalanceTemplate = useDueBalanceTemplate;
+        RebuildMessage();
+        _feedbackMessage = null;
+    }
+
+    private void RebuildMessage()
+    {
+        _message = _useDueBalanceTemplate
+            ? MessageComposer.BuildDueBalanceReminder(
+                _customerName,
+                ParseOrderReference(),
+                new DateTimeOffset(_dueDate, TimeSpan.Zero),
+                _balanceDue)
+            : MessageComposer.BuildOrderUpdateMessage(
+                _customerName,
+                ParseOrderReference(),
+                _status,
+                new DateTimeOffset(_dueDate, TimeSpan.Zero),
+                _balanceDue);
+
+        _feedbackMessage = null;
+    }
+
+    private async Task OpenWhatsAppAsync()
+    {
+        _isOpening = true;
+        _feedbackMessage = null;
+
+        try
+        {
+            var result = await WhatsAppService.OpenChatAsync(_phoneNumber, _message);
+            _isFeedbackSuccess = result.IsSuccess;
+            _feedbackMessage = result.IsSuccess
+                ? "WhatsApp opened. Review and send your message manually."
+                : result.ErrorMessage ?? "Unable to open WhatsApp.";
+        }
+        finally
+        {
+            _isOpening = false;
+        }
+    }
+
+    private Guid? ParseOrderReference()
+    {
+        return Guid.TryParse(_orderReference, out var orderId)
+            ? orderId
+            : null;
+    }
+
+    private bool IsDueBalanceRoute()
+    {
+        return string.Equals(QueryTemplate, "balance", StringComparison.OrdinalIgnoreCase)
+            || NavigationManager.ToBaseRelativePath(NavigationManager.Uri)
+                .StartsWith("communications/reminder", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private string GetTemplateButtonClass(bool useDueBalanceTemplate)
+    {
+        return _useDueBalanceTemplate == useDueBalanceTemplate
+            ? "template-button active"
+            : "template-button";
+    }
+
+    private bool _showManualPhoneField => _loadedOrder is null;
+
+    private static string FormatStatusLabel(string? status)
+    {
+        if (string.IsNullOrWhiteSpace(status))
+        {
+            return "Unknown";
+        }
+
+        return status.Trim() switch
+        {
+            "InProgress" => "In Progress",
+            "TrialFitting" => "Trial/Fitting",
+            _ => status.Trim(),
+        };
+    }
+
+    private static string FormatOptional(string? value)
+    {
+        return string.IsNullOrWhiteSpace(value)
+            ? "Not available"
+            : value.Trim();
+    }
+
+    private static string FormatDueDate(DateTimeOffset dueAtUtc)
+    {
+        return dueAtUtc.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+    }
+
+    private static string FormatCurrency(decimal value)
+    {
+        return string.Format(CultureInfo.InvariantCulture, "{0:0.00} ETB", Math.Max(0m, value));
+    }
+}
+
+<style>
+    .whatsapp-shell {
+        --ink: #173042;
+        --surface: #f0faf3;
+        --line: #c7e6d0;
+        --accent: #1f8f5f;
+        --accent-soft: #dcf4e6;
+        --danger: #b42318;
+        --danger-soft: #fff1ef;
+        font-family: "Avenir Next", "Trebuchet MS", sans-serif;
+        color: var(--ink);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 1.25rem;
+        background:
+            radial-gradient(circle at 90% 10%, rgba(31, 143, 95, 0.14), transparent 38%),
+            var(--surface);
+        box-shadow: 0 14px 34px -24px rgba(23, 48, 66, 0.75);
+    }
+
+    .whatsapp-header h1 {
+        margin: 0;
+        font-size: clamp(1.35rem, 2.7vw, 2rem);
+    }
+
+    .whatsapp-header p {
+        margin-top: 0.45rem;
+        color: #345061;
+    }
+
+    .feedback {
+        margin-top: 1rem;
+        border-radius: 8px;
+        padding: 0.75rem 0.9rem;
+    }
+
+    .feedback.ok {
+        border: 1px solid #9ed7b2;
+        background: var(--accent-soft);
+        color: #0b5b38;
+    }
+
+    .feedback.error {
+        border: 1px solid #f4c8c1;
+        background: var(--danger-soft);
+        color: var(--danger);
+    }
+
+    .whatsapp-toolbar {
+        margin-top: 1rem;
+        display: grid;
+        gap: 0.9rem;
+        grid-template-columns: minmax(0, 1.5fr) auto;
+    }
+
+    label {
+        display: grid;
+        gap: 0.35rem;
+        font-size: 0.9rem;
+        color: #2f4958;
+    }
+
+    .full-width {
+        display: grid;
+        gap: 0.35rem;
+        margin-top: 1rem;
+    }
+
+    input,
+    textarea,
+    button {
+        font: inherit;
+    }
+
+    input,
+    textarea {
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        padding: 0.55rem 0.65rem;
+        background: #fff;
+    }
+
+    .order-input-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 0.65rem;
+        align-items: end;
+    }
+
+    .template-picker {
+        display: inline-flex;
+        gap: 0.4rem;
+        align-items: end;
+        align-self: end;
+        justify-self: end;
+    }
+
+    .template-button {
+        display: inline-flex;
+        align-items: center;
+        background: transparent;
+        color: var(--accent);
+        border: 1px solid var(--line);
+    }
+
+    .template-button.active {
+        background: var(--accent);
+        color: #fff;
+        border-color: var(--accent);
+    }
+
+    .order-summary {
+        margin-top: 1rem;
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 0.75rem;
+    }
+
+    .search-results {
+        margin-top: 1rem;
+        display: grid;
+        gap: 0.75rem;
+    }
+
+    .results-header {
+        display: grid;
+        gap: 0.15rem;
+        color: #345061;
+    }
+
+    .search-result-card {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        width: 100%;
+        text-align: left;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 0.85rem 0.95rem;
+        background: rgba(255, 255, 255, 0.94);
+        color: var(--ink);
+    }
+
+    .search-result-card div {
+        display: grid;
+        gap: 0.18rem;
+    }
+
+    .search-result-card strong,
+    .search-result-card span {
+        display: block;
+    }
+
+    .search-result-card span {
+        color: #5b7380;
+        font-size: 0.82rem;
+    }
+
+    .order-summary article,
+    .empty-state {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 0.85rem 0.95rem;
+        background: rgba(255, 255, 255, 0.9);
+    }
+
+    .order-summary span,
+    .empty-state span {
+        display: block;
+        color: #5b7380;
+        font-size: 0.82rem;
+    }
+
+    .order-summary strong,
+    .empty-state strong {
+        display: block;
+        margin: 0.2rem 0;
+        font-size: 1rem;
+        color: var(--ink);
+    }
+
+    .order-summary small {
+        color: #456171;
+        font-size: 0.82rem;
+    }
+
+    .manual-phone-row {
+        margin-top: 1rem;
+        max-width: 22rem;
+    }
+
+    input:focus,
+    textarea:focus {
+        outline: 2px solid rgba(31, 143, 95, 0.25);
+        border-color: var(--accent);
+    }
+
+    .whatsapp-actions {
+        margin-top: 1.15rem;
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        gap: 0.65rem;
+    }
+
+    button {
+        border: none;
+        border-radius: 4px;
+        padding: 0.6rem 0.95rem;
+        background: var(--accent);
+        color: #fff;
+        font-weight: 700;
+        cursor: pointer;
+    }
+
+    button.ghost {
+        background: transparent;
+        color: var(--accent);
+        border: 1px solid var(--line);
+    }
+
+    button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+    }
+
+    .whatsapp-glyph {
+        display: inline-grid;
+        place-items: center;
+        width: 1rem;
+        height: 1rem;
+        margin-right: 0.35rem;
+        border-radius: 999px;
+        background: #25d366;
+        vertical-align: -0.12rem;
+    }
+
+    .whatsapp-glyph::before {
+        content: "";
+        width: 0.42rem;
+        height: 0.42rem;
+        border: 2px solid #ffffff;
+        border-top-color: transparent;
+        border-left-color: transparent;
+        border-radius: 2px;
+        transform: rotate(-35deg);
+    }
+
+    @@media (max-width: 640px) {
+        .whatsapp-shell {
+            padding: 1rem;
+        }
+
+        .whatsapp-toolbar,
+        .order-input-row {
+            grid-template-columns: 1fr;
+        }
+
+        .template-picker {
+            width: 100%;
+            justify-self: stretch;
+        }
+
+        .search-result-card {
+            flex-direction: column;
+            align-items: flex-start;
+        }
+
+        .template-picker button {
+            flex: 1 1 0;
+        }
+
+        .whatsapp-actions {
+            flex-direction: column;
+        }
+
+        .whatsapp-actions button {
+            width: 100%;
+        }
+    }
+</style>

@@ -1,0 +1,1318 @@
+@page "/orders/new"
+@using System.IO
+@using Microsoft.AspNetCore.Components
+@using Microsoft.AspNetCore.Components.Forms
+@using STailor.UI.Rcl.Models
+@using STailor.UI.Rcl.Services
+@inject OrderWizardSubmissionService SubmissionService
+@inject WorkspaceSettingsService WorkspaceSettings
+
+<section class="wizard-shell">
+    <header class="wizard-header">
+        <h1>Order Intake</h1>
+        <p>Capture customer details, measurements, and payment data in one guided flow.</p>
+        @if (HasExistingCustomerPrefill)
+        {
+            <div class="prefill-banner">
+                <strong>Existing customer selected.</strong>
+                <span>This order will be added for @_model.FullName, and saved customer measurements will update for this customer.</span>
+            </div>
+        }
+        <div class="wizard-steps" role="list" aria-label="Wizard steps">
+            @for (var index = 0; index < StepLabels.Length; index++)
+            {
+                var step = index + 1;
+                <span class="@GetStepClass(step)" role="listitem">@step. @StepLabels[index]</span>
+            }
+        </div>
+    </header>
+
+    @if (_errors.Count > 0)
+    {
+        <div class="wizard-errors" role="alert">
+            <strong>Please fix the following items:</strong>
+            <ul>
+                @foreach (var error in _errors)
+                {
+                    <li>@error</li>
+                }
+            </ul>
+        </div>
+    }
+
+    @if (_result?.IsSuccess == true)
+    {
+        <div class="wizard-success" role="status">
+            <strong>Order intake completed.</strong>
+            <p>
+                Customer: @_result.CustomerName (@_result.PhoneNumber)<br />
+                Customer Id: @_result.CustomerId<br />
+                Order: @_result.OrderId<br />
+                Final status: @_result.FinalStatus<br />
+                Due date: @_result.DueAtUtc?.ToString("yyyy-MM-dd")<br />
+                Balance due: @_result.BalanceDue
+            </p>
+            <div class="wizard-success-actions">
+                <a class="success-link" href="@BuildWhatsAppPrefillLink(useDueBalanceTemplate: false)"><span class="whatsapp-glyph" aria-hidden="true"></span>Send WhatsApp Update</a>
+                <a class="success-link" href="@BuildWhatsAppPrefillLink(useDueBalanceTemplate: true)"><span class="whatsapp-glyph" aria-hidden="true"></span>Send Due and Balance Reminder</a>
+            </div>
+        </div>
+    }
+
+    <div class="wizard-stage">
+        @if (_currentStep == 1)
+        {
+            <h2>Step 1: Customer</h2>
+            <div class="form-grid">
+                <label>
+                    Full Name
+                    <input type="text" @bind="_model.FullName" readonly="@HasExistingCustomerPrefill" />
+                </label>
+                <label>
+                    Phone Number
+                    <input type="tel" @bind="_model.PhoneNumber" readonly="@HasExistingCustomerPrefill" />
+                </label>
+                <label>
+                    City
+                    <input type="text" @bind="_model.City" readonly="@HasExistingCustomerPrefill" />
+                </label>
+                <label class="full-width">
+                    Notes
+                    <textarea rows="3" @bind="_model.Notes" readonly="@HasExistingCustomerPrefill"></textarea>
+                </label>
+            </div>
+        }
+
+        @if (_currentStep == 2)
+        {
+            <h2>Step 2: Garment & Measurements</h2>
+            <div class="form-grid">
+                <label>
+                    Garment Type
+                    <span class="garment-picker">
+                        <select value="@_model.GarmentType" @onchange="OnGarmentTypeChanged">
+                            @foreach (var garmentType in GetGarmentTypes())
+                            {
+                                <option value="@garmentType">@garmentType</option>
+                            }
+                        </select>
+                        <button type="button" class="square-add-button" title="Add garment type" @onclick="OpenGarmentModal">+</button>
+                    </span>
+                </label>
+            </div>
+
+            <div class="measurement-toolbar">
+                <p>Start with standard measurements for this garment, then edit or add more as needed.</p>
+                <div class="measurement-toolbar-actions">
+                    <button type="button" class="ghost" @onclick="UseGarmentDefaults">Use Standard Measurements</button>
+                </div>
+            </div>
+
+            <div class="measurement-table">
+                @foreach (var measurement in _model.Measurements)
+                {
+                    <div class="measurement-row">
+                        <input type="text" placeholder="Measurement name" @bind="measurement.Name" />
+                        <input type="number" min="0.01" step="0.01" placeholder="Value" @bind="measurement.Value" />
+                        <button
+                            type="button"
+                            class="ghost"
+                            disabled="@(_model.Measurements.Count == 1)"
+                            @onclick="() => RemoveMeasurementRow(measurement.Id)">
+                            Remove
+                        </button>
+                    </div>
+                }
+                <button type="button" class="add-row-button" title="Add measurement" aria-label="Add measurement" @onclick="AddMeasurementRow">+</button>
+            </div>
+
+            <h3>Optional Photo Attachments</h3>
+            <div class="photo-toolbar">
+                <label class="upload-button">
+                    <span>Browse Photos</span>
+                    <InputFile accept="image/*" multiple OnChange="OnPhotosSelectedAsync" />
+                </label>
+                <span class="photo-help">Selected photos are saved with this order so they stay attached to the order record.</span>
+            </div>
+            @if (_model.PhotoAttachments.Count == 0)
+            {
+                <p class="muted-note">No photos selected yet.</p>
+            }
+            else
+            {
+                <div class="photo-grid">
+                    @foreach (var attachment in _model.PhotoAttachments)
+                    {
+                        <article class="photo-card">
+                            <img src="@attachment.ResourcePath" alt="@attachment.FileName" />
+                            <div class="photo-card-copy">
+                                <strong>@attachment.FileName</strong>
+                                <button type="button" class="ghost" @onclick="() => RemovePhotoAttachmentRow(attachment.Id)">Remove</button>
+                            </div>
+                        </article>
+                    }
+                </div>
+            }
+        }
+
+        @if (_currentStep == 3)
+        {
+            <h2>Step 3: Pricing & Due Date</h2>
+            <div class="form-grid">
+                <label>
+                    Amount Charged
+                    <input type="number" min="0" step="0.01" @bind="_model.AmountCharged" />
+                </label>
+                <label>
+                    Initial Deposit
+                    <input type="number" min="0" max="@_model.AmountCharged" step="0.01" @bind="_model.InitialDeposit" />
+                </label>
+                <label>
+                    Due Date
+                    <input type="date" @bind="_model.DueDate" />
+                </label>
+                <label>
+                    Fitting Date (Optional)
+                    <input type="date" @bind="_model.TrialDate" />
+                </label>
+                <label class="full-width checkbox-row">
+                    <span>After saving, should this order move into the Fitting stage?</span>
+                    <input type="checkbox" @bind="_model.ApplyTrialStatusTransition" />
+                </label>
+                <p class="field-note full-width">
+                    Fitting means the customer comes in to try the garment before final finishing. It sits between In Progress and Rework in the workflow.
+                </p>
+            </div>
+        }
+
+        @if (_currentStep == 4)
+        {
+            <h2>Step 4: Confirm & Submit</h2>
+            <div class="form-grid">
+                <label>
+                    Target Status
+                    <select @bind="_model.TargetStatus">
+                        <option value="New">New</option>
+                        <option value="InProgress">In Progress</option>
+                        <option value="TrialFitting">Trial/Fitting</option>
+                        <option value="Rework">Rework</option>
+                        <option value="Ready">Ready</option>
+                    </select>
+                </label>
+            </div>
+
+            <div class="review-panel">
+                <p><strong>Customer:</strong> @_model.FullName (@_model.PhoneNumber)</p>
+                <p><strong>City:</strong> @_model.City</p>
+                <p><strong>Garment:</strong> @_model.GarmentType</p>
+                <p><strong>Measurements:</strong> @_model.Measurements.Count row(s)</p>
+                <p><strong>Charged:</strong> @_model.AmountCharged</p>
+                <p><strong>Deposit:</strong> @_model.InitialDeposit</p>
+                <p><strong>Due Date:</strong> @_model.DueDate.ToString("yyyy-MM-dd")</p>
+                <p><strong>Fitting:</strong> @GetTrialScheduleSummary()</p>
+                <p><strong>Target Status:</strong> @_model.TargetStatus</p>
+            </div>
+        }
+    </div>
+
+    <footer class="wizard-actions">
+        <button type="button" class="ghost" disabled="@(_currentStep == 1 || _isSubmitting)" @onclick="PreviousStep">Back</button>
+
+        @if (_currentStep < StepLabels.Length)
+        {
+            <button type="button" disabled="@_isSubmitting" @onclick="NextStep">Next</button>
+        }
+        else
+        {
+            <button type="button" disabled="@_isSubmitting" @onclick="SubmitAsync">
+                @(_isSubmitting ? "Submitting..." : "Submit Order")
+            </button>
+        }
+    </footer>
+
+    @if (_isGarmentModalOpen)
+    {
+        <div class="modal-backdrop" role="dialog" aria-modal="true" aria-label="Add garment type">
+            <section class="garment-modal">
+                <header>
+                    <h2>Add Garment Type</h2>
+                    <p>Create the garment and its default measurements once. Staff can reuse it during future orders.</p>
+                </header>
+
+                @if (!string.IsNullOrWhiteSpace(_garmentModalMessage))
+                {
+                    <div class="@(_isGarmentModalError ? "modal-feedback error" : "modal-feedback")" role="status">@_garmentModalMessage</div>
+                }
+
+                <label>
+                    Garment name
+                    <input type="text" @bind="_newGarmentName" placeholder="Sherwani, Abaya, Blazer" />
+                </label>
+
+                <div class="modal-measurements">
+                    @foreach (var row in _newGarmentMeasurements)
+                    {
+                        <div class="measurement-row">
+                            <input type="text" placeholder="Measurement name" @bind="row.Name" />
+                            <input type="number" min="0.01" step="0.01" placeholder="Default value" @bind="row.Value" />
+                            <button type="button" class="ghost" disabled="@(_newGarmentMeasurements.Count == 1)" @onclick="() => RemoveNewGarmentMeasurement(row.Id)">Remove</button>
+                        </div>
+                    }
+                </div>
+
+                <div class="modal-actions">
+                    <button type="button" class="add-row-button modal-add-row" title="Add measurement" aria-label="Add measurement" @onclick="AddNewGarmentMeasurement">+</button>
+                    <span class="modal-spacer"></span>
+                    <button type="button" class="ghost" @onclick="CloseGarmentModal">Cancel</button>
+                    <button type="button" @onclick="SaveNewGarmentType">Save Garment</button>
+                </div>
+            </section>
+        </div>
+    }
+</section>
+
+@code {
+    [SupplyParameterFromQuery(Name = "customerId")]
+    private Guid? PrefillCustomerId { get; set; }
+
+    [SupplyParameterFromQuery(Name = "fullName")]
+    private string? PrefillFullName { get; set; }
+
+    [SupplyParameterFromQuery(Name = "phoneNumber")]
+    private string? PrefillPhoneNumber { get; set; }
+
+    [SupplyParameterFromQuery(Name = "city")]
+    private string? PrefillCity { get; set; }
+
+    [SupplyParameterFromQuery(Name = "notes")]
+    private string? PrefillNotes { get; set; }
+
+    [SupplyParameterFromQuery(Name = "apiBaseUrl")]
+    private string? PrefillApiBaseUrl { get; set; }
+
+    private static readonly string[] StepLabels =
+    {
+        "Customer",
+        "Measurements",
+        "Pricing",
+        "Confirm",
+    };
+
+    private readonly WizardViewModel _model = new();
+    private readonly List<string> _errors = new();
+    private int _currentStep = 1;
+    private bool _isSubmitting;
+    private bool _isGarmentModalOpen;
+    private bool _isGarmentModalError;
+    private OrderWizardSubmissionResult? _result;
+    private string? _appliedPrefillSignature;
+    private string _newGarmentName = string.Empty;
+    private string? _garmentModalMessage;
+    private List<MeasurementRow> _newGarmentMeasurements = [];
+
+    private bool HasExistingCustomerPrefill => _model.ExistingCustomerId.HasValue;
+
+    protected override void OnParametersSet()
+    {
+        _model.ApiBaseUrl = WorkspaceSettings.ApiBaseUrl;
+        EnsureSelectedGarmentType();
+
+        var signature = BuildPrefillSignature();
+        if (string.Equals(signature, _appliedPrefillSignature, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        ApplyPrefill();
+        _appliedPrefillSignature = signature;
+    }
+
+    private string GetStepClass(int step)
+    {
+        if (step < _currentStep)
+        {
+            return "step-chip done";
+        }
+
+        if (step == _currentStep)
+        {
+            return "step-chip active";
+        }
+
+        return "step-chip";
+    }
+
+    private void NextStep()
+    {
+        if (!ValidateCurrentStep())
+        {
+            return;
+        }
+
+        _currentStep++;
+    }
+
+    private void PreviousStep()
+    {
+        if (_currentStep > 1)
+        {
+            _errors.Clear();
+            _currentStep--;
+        }
+    }
+
+    private void AddMeasurementRow()
+    {
+        _model.Measurements.Add(new MeasurementRow());
+    }
+
+    private void RemoveMeasurementRow(Guid id)
+    {
+        _model.Measurements.RemoveAll(row => row.Id == id);
+    }
+
+    private void RemovePhotoAttachmentRow(Guid id)
+    {
+        _model.PhotoAttachments.RemoveAll(row => row.Id == id);
+    }
+
+    private async Task OnPhotosSelectedAsync(InputFileChangeEventArgs args)
+    {
+        foreach (var file in args.GetMultipleFiles())
+        {
+            try
+            {
+                await using var stream = file.OpenReadStream(maxAllowedSize: 5 * 1024 * 1024);
+                using var memoryStream = new MemoryStream();
+                await stream.CopyToAsync(memoryStream);
+
+                var contentType = string.IsNullOrWhiteSpace(file.ContentType)
+                    ? "image/png"
+                    : file.ContentType;
+
+                _model.PhotoAttachments.Add(new PhotoAttachmentRow(
+                    file.Name,
+                    $"data:{contentType};base64,{Convert.ToBase64String(memoryStream.ToArray())}"));
+            }
+            catch (IOException)
+            {
+                _errors.Add($"Photo '{file.Name}' is too large. Keep each image under 5 MB.");
+            }
+        }
+    }
+
+    private bool ValidateCurrentStep()
+    {
+        _errors.Clear();
+
+        if (_currentStep == 1)
+        {
+            if (string.IsNullOrWhiteSpace(_model.FullName))
+            {
+                _errors.Add("Full name is required.");
+            }
+
+            if (string.IsNullOrWhiteSpace(_model.PhoneNumber))
+            {
+                _errors.Add("Phone number is required.");
+            }
+
+            if (string.IsNullOrWhiteSpace(_model.City))
+            {
+                _errors.Add("City is required.");
+            }
+        }
+
+        if (_currentStep == 2)
+        {
+            if (string.IsNullOrWhiteSpace(_model.GarmentType))
+            {
+                _errors.Add("Garment type is required.");
+            }
+
+            if (_model.Measurements.Count == 0)
+            {
+                _errors.Add("At least one measurement row is required.");
+            }
+
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var measurement in _model.Measurements)
+            {
+                if (string.IsNullOrWhiteSpace(measurement.Name))
+                {
+                    _errors.Add("Each measurement row requires a name.");
+                    continue;
+                }
+
+                if (measurement.Value is null || measurement.Value <= 0)
+                {
+                    _errors.Add($"Measurement '{measurement.Name}' must be greater than zero.");
+                }
+
+                if (!names.Add(measurement.Name.Trim()))
+                {
+                    _errors.Add($"Measurement '{measurement.Name}' is duplicated.");
+                }
+            }
+
+        }
+
+        if (_currentStep == 3)
+        {
+            if (_model.AmountCharged <= 0)
+            {
+                _errors.Add("Amount charged must be greater than zero.");
+            }
+
+            if (_model.InitialDeposit < 0)
+            {
+                _errors.Add("Initial deposit cannot be negative.");
+            }
+
+            if (_model.InitialDeposit > _model.AmountCharged)
+            {
+                _errors.Add("Initial deposit cannot exceed amount charged.");
+            }
+
+            if (_model.DueDate.Date < DateTime.UtcNow.Date)
+            {
+                _errors.Add("Due date cannot be in the past.");
+            }
+
+            if (_model.TrialDate is not null && _model.TrialDate.Value.Date < DateTime.UtcNow.Date)
+            {
+                _errors.Add("Trial/Fitting date cannot be in the past.");
+            }
+        }
+
+        if (_currentStep == 4 && string.IsNullOrWhiteSpace(_model.TargetStatus))
+        {
+            _errors.Add("Target status is required.");
+        }
+
+        return _errors.Count == 0;
+    }
+
+    private async Task SubmitAsync()
+    {
+        if (!ValidateCurrentStep())
+        {
+            return;
+        }
+
+        _isSubmitting = true;
+        _errors.Clear();
+        _result = null;
+
+        try
+        {
+            _model.ApiBaseUrl = WorkspaceSettings.ApiBaseUrl;
+
+            var request = new OrderWizardSubmissionRequest(
+                ApiBaseUrl: _model.ApiBaseUrl,
+                ExistingCustomerId: _model.ExistingCustomerId,
+                FullName: _model.FullName.Trim(),
+                PhoneNumber: _model.PhoneNumber.Trim(),
+                City: _model.City.Trim(),
+                Notes: string.IsNullOrWhiteSpace(_model.Notes) ? null : _model.Notes.Trim(),
+                GarmentType: _model.GarmentType,
+                Measurements: BuildMeasurementDictionary(),
+                PhotoAttachments: BuildPhotoAttachments(),
+                AmountCharged: _model.AmountCharged,
+                InitialDeposit: _model.InitialDeposit,
+                DueAtUtc: new DateTimeOffset(_model.DueDate.Date, TimeSpan.Zero),
+                TrialScheduledAtUtc: BuildTrialScheduleUtc(),
+                TrialScheduleStatus: "Scheduled",
+                ApplyTrialStatusTransition: _model.TrialDate is not null && _model.ApplyTrialStatusTransition,
+                TargetStatus: _model.TargetStatus);
+
+            _result = await SubmissionService.SubmitAsync(request);
+            if (!_result.IsSuccess)
+            {
+                _errors.Add(_result.ErrorMessage ?? "Order submission failed.");
+                return;
+            }
+
+            var apiBaseUrl = _model.ApiBaseUrl;
+            var defaultGarmentType = GetDefaultGarmentType();
+            _model.Reset(apiBaseUrl, defaultGarmentType, GetMeasurementDefaults(defaultGarmentType));
+            _currentStep = 1;
+        }
+        finally
+        {
+            _isSubmitting = false;
+        }
+    }
+
+    private IReadOnlyDictionary<string, decimal> BuildMeasurementDictionary()
+    {
+        return _model.Measurements
+            .Where(row => !string.IsNullOrWhiteSpace(row.Name) && row.Value is > 0)
+            .GroupBy(row => row.Name.Trim(), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Last().Value!.Value, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private IReadOnlyList<OrderWizardPhotoAttachmentInput> BuildPhotoAttachments()
+    {
+        return _model.PhotoAttachments
+            .Where(row => !string.IsNullOrWhiteSpace(row.FileName) && !string.IsNullOrWhiteSpace(row.ResourcePath))
+            .Select(row => new OrderWizardPhotoAttachmentInput(
+                row.FileName.Trim(),
+                row.ResourcePath.Trim(),
+                null))
+            .ToArray();
+    }
+
+    private DateTimeOffset? BuildTrialScheduleUtc()
+    {
+        if (_model.TrialDate is null)
+        {
+            return null;
+        }
+
+        var utcDateTime = DateTime.SpecifyKind(_model.TrialDate.Value.Date.AddHours(12), DateTimeKind.Utc);
+        return new DateTimeOffset(utcDateTime, TimeSpan.Zero);
+    }
+
+    private string GetTrialScheduleSummary()
+    {
+        var trialUtc = BuildTrialScheduleUtc();
+        return trialUtc is null
+            ? "Not scheduled"
+            : _model.ApplyTrialStatusTransition
+                ? $"{trialUtc.Value:yyyy-MM-dd} (will move into Fitting)"
+                : $"{trialUtc.Value:yyyy-MM-dd}";
+    }
+
+    private void UseGarmentDefaults()
+    {
+        _model.Measurements.Clear();
+
+        foreach (var preset in GetMeasurementDefaults(_model.GarmentType))
+        {
+            _model.Measurements.Add(new MeasurementRow(preset.Name, preset.Value));
+        }
+    }
+
+    private void OnGarmentTypeChanged(ChangeEventArgs args)
+    {
+        _model.GarmentType = args.Value?.ToString()?.Trim() ?? GetDefaultGarmentType();
+        UseGarmentDefaults();
+    }
+
+    private IReadOnlyList<string> GetGarmentTypes()
+    {
+        return WorkspaceSettings.GarmentTypes.Count == 0
+            ? WorkspaceSettingsService.DefaultGarmentTypes
+            : WorkspaceSettings.GarmentTypes;
+    }
+
+    private string GetDefaultGarmentType()
+    {
+        return GetGarmentTypes()[0];
+    }
+
+    private void EnsureSelectedGarmentType()
+    {
+        var garmentTypes = GetGarmentTypes();
+        if (garmentTypes.Any(garmentType => string.Equals(garmentType, _model.GarmentType, StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        _model.GarmentType = garmentTypes[0];
+        UseGarmentDefaults();
+    }
+
+    private IReadOnlyList<GarmentMeasurementDefault> GetMeasurementDefaults(string garmentType)
+    {
+        return WorkspaceSettings.GetMeasurementDefaults(garmentType);
+    }
+
+    private void OpenGarmentModal()
+    {
+        _newGarmentName = string.Empty;
+        _garmentModalMessage = null;
+        _isGarmentModalError = false;
+        _newGarmentMeasurements =
+        [
+            new MeasurementRow("Chest", 40m),
+            new MeasurementRow("Length", 40m),
+        ];
+        _isGarmentModalOpen = true;
+    }
+
+    private void CloseGarmentModal()
+    {
+        _isGarmentModalOpen = false;
+        _garmentModalMessage = null;
+        _isGarmentModalError = false;
+    }
+
+    private void AddNewGarmentMeasurement()
+    {
+        _newGarmentMeasurements.Add(new MeasurementRow());
+    }
+
+    private void RemoveNewGarmentMeasurement(Guid id)
+    {
+        _newGarmentMeasurements.RemoveAll(row => row.Id == id);
+        if (_newGarmentMeasurements.Count == 0)
+        {
+            _newGarmentMeasurements.Add(new MeasurementRow());
+        }
+    }
+
+    private void SaveNewGarmentType()
+    {
+        var garmentName = _newGarmentName.Trim();
+        if (string.IsNullOrWhiteSpace(garmentName))
+        {
+            _garmentModalMessage = "Garment name is required.";
+            _isGarmentModalError = true;
+            return;
+        }
+
+        var defaults = _newGarmentMeasurements
+            .Where(row => !string.IsNullOrWhiteSpace(row.Name) && row.Value is > 0m)
+            .Select(row => new GarmentMeasurementDefault(row.Name.Trim(), row.Value!.Value))
+            .ToArray();
+
+        if (defaults.Length == 0)
+        {
+            _garmentModalMessage = "Add at least one default measurement.";
+            _isGarmentModalError = true;
+            return;
+        }
+
+        try
+        {
+            WorkspaceSettings.UpdateMeasurementDefaults(garmentName, defaults);
+            _model.GarmentType = garmentName;
+            UseGarmentDefaults();
+            CloseGarmentModal();
+        }
+        catch (ArgumentException exception)
+        {
+            _garmentModalMessage = exception.Message;
+            _isGarmentModalError = true;
+        }
+    }
+
+    private string BuildWhatsAppPrefillLink(bool useDueBalanceTemplate)
+    {
+        if (_result is null)
+        {
+            return useDueBalanceTemplate
+                ? "/orders/reminders"
+                : "/communications/whatsapp";
+        }
+
+        return WhatsAppPrefillLinkBuilder.BuildFromOrderResult(_result, useDueBalanceTemplate);
+    }
+
+    private string BuildPrefillSignature()
+    {
+        return string.Join("|",
+            PrefillCustomerId?.ToString() ?? string.Empty,
+            PrefillFullName ?? string.Empty,
+            PrefillPhoneNumber ?? string.Empty,
+            PrefillCity ?? string.Empty,
+            PrefillNotes ?? string.Empty,
+            PrefillApiBaseUrl ?? string.Empty);
+    }
+
+    private void ApplyPrefill()
+    {
+        _model.ApiBaseUrl = WorkspaceSettings.ApiBaseUrl;
+
+        if (!string.IsNullOrWhiteSpace(PrefillApiBaseUrl))
+        {
+            WorkspaceSettings.ApplyApiBaseUrlOverride(PrefillApiBaseUrl);
+            _model.ApiBaseUrl = WorkspaceSettings.ApiBaseUrl;
+        }
+
+        _model.ExistingCustomerId = PrefillCustomerId is { } customerId && customerId != Guid.Empty
+            ? customerId
+            : null;
+
+        if (_model.ExistingCustomerId.HasValue)
+        {
+            _model.FullName = PrefillFullName?.Trim() ?? string.Empty;
+            _model.PhoneNumber = PrefillPhoneNumber?.Trim() ?? string.Empty;
+            _model.City = PrefillCity?.Trim() ?? string.Empty;
+            _model.Notes = string.IsNullOrWhiteSpace(PrefillNotes) ? null : PrefillNotes.Trim();
+        }
+    }
+
+    private sealed class WizardViewModel
+    {
+        public string ApiBaseUrl { get; set; } = "http://localhost:5064";
+
+        public Guid? ExistingCustomerId { get; set; }
+
+        public string FullName { get; set; } = string.Empty;
+
+        public string PhoneNumber { get; set; } = string.Empty;
+
+        public string City { get; set; } = string.Empty;
+
+        public string? Notes { get; set; }
+
+        public string GarmentType { get; set; } = "Suit";
+
+        public List<MeasurementRow> Measurements { get; } =
+        [
+            new("Chest", 40m),
+            new("Waist", 32m),
+            new("Hip", 38m),
+            new("Sleeve", 24m),
+            new("Shoulder", 18m),
+        ];
+
+        public decimal AmountCharged { get; set; } = 1200m;
+
+        public decimal InitialDeposit { get; set; } = 0m;
+
+        public DateTime DueDate { get; set; } = DateTime.UtcNow.Date.AddDays(7);
+
+        public DateTime? TrialDate { get; set; }
+
+        public bool ApplyTrialStatusTransition { get; set; } = true;
+
+        public List<PhotoAttachmentRow> PhotoAttachments { get; } = [];
+
+        public string TargetStatus { get; set; } = "New";
+
+        public void Reset(
+            string apiBaseUrl,
+            string garmentType,
+            IEnumerable<GarmentMeasurementDefault> measurementDefaults)
+        {
+            ApiBaseUrl = apiBaseUrl;
+            ExistingCustomerId = null;
+            FullName = string.Empty;
+            PhoneNumber = string.Empty;
+            City = string.Empty;
+            Notes = null;
+            GarmentType = string.IsNullOrWhiteSpace(garmentType) ? "Suit" : garmentType;
+            Measurements.Clear();
+            foreach (var preset in measurementDefaults)
+            {
+                Measurements.Add(new MeasurementRow(preset.Name, preset.Value));
+            }
+            AmountCharged = 1200m;
+            InitialDeposit = 0m;
+            DueDate = DateTime.UtcNow.Date.AddDays(7);
+            TrialDate = null;
+            ApplyTrialStatusTransition = true;
+            PhotoAttachments.Clear();
+            TargetStatus = "New";
+        }
+    }
+
+    private sealed class MeasurementRow
+    {
+        public MeasurementRow()
+        {
+        }
+
+        public MeasurementRow(string name, decimal value)
+        {
+            Name = name;
+            Value = value;
+        }
+
+        public Guid Id { get; } = Guid.NewGuid();
+
+        public string Name { get; set; } = string.Empty;
+
+        public decimal? Value { get; set; }
+    }
+
+    private sealed class PhotoAttachmentRow
+    {
+        public PhotoAttachmentRow(string fileName, string resourcePath)
+        {
+            FileName = fileName;
+            ResourcePath = resourcePath;
+        }
+
+        public Guid Id { get; } = Guid.NewGuid();
+
+        public string FileName { get; set; } = string.Empty;
+
+        public string ResourcePath { get; set; } = string.Empty;
+    }
+}
+
+<style>
+    .wizard-shell {
+        --surface: #fff8ef;
+        --ink: #1d2a35;
+        --accent: #005f73;
+        --accent-soft: #e4f2f4;
+        --alert: #b42318;
+        --success: #1c7c54;
+        --line: #d9e2e8;
+        font-family: "Avenir Next", "Trebuchet MS", sans-serif;
+        color: var(--ink);
+        padding: 1.25rem;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: linear-gradient(160deg, var(--surface), #fff);
+        box-shadow: 0 16px 36px -24px rgba(0, 95, 115, 0.45);
+        animation: fade-in 320ms ease-out;
+    }
+
+    .wizard-header h1 {
+        margin: 0;
+        font-size: clamp(1.35rem, 2.5vw, 2rem);
+        letter-spacing: 0.02em;
+    }
+
+    .wizard-header p {
+        margin-top: 0.45rem;
+        color: #405363;
+    }
+
+    .wizard-steps {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin-top: 1rem;
+    }
+
+    .prefill-banner {
+        margin-top: 0.9rem;
+        display: grid;
+        gap: 0.3rem;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        padding: 0.8rem 0.9rem;
+        background: #f8fafc;
+        color: #0f172a;
+    }
+
+    .step-chip {
+        font-size: 0.82rem;
+        padding: 0.35rem 0.65rem;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: #fff;
+        color: #516173;
+    }
+
+    .step-chip.active {
+        border-color: var(--accent);
+        background: var(--accent-soft);
+        color: var(--accent);
+        font-weight: 700;
+    }
+
+    .step-chip.done {
+        border-color: var(--success);
+        color: var(--success);
+    }
+
+    .wizard-errors,
+    .wizard-success {
+        margin-top: 1rem;
+        border-radius: 8px;
+        padding: 0.85rem 1rem;
+    }
+
+    .wizard-errors {
+        border: 1px solid #f4c8c1;
+        background: #fff1ef;
+        color: var(--alert);
+    }
+
+    .wizard-errors ul {
+        margin: 0.45rem 0 0;
+    }
+
+    .wizard-success {
+        border: 1px solid #b4e3c6;
+        background: #eef9f2;
+        color: var(--success);
+    }
+
+    .wizard-success-actions {
+        margin-top: 0.85rem;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+    }
+
+    .success-link {
+        display: inline-flex;
+        align-items: center;
+        text-decoration: none;
+        border: 1px solid #8bc9a5;
+        border-radius: 4px;
+        padding: 0.45rem 0.7rem;
+        background: #ffffff;
+        color: #0b5b38;
+        font-weight: 700;
+        font-size: 0.85rem;
+    }
+
+    .success-link:hover {
+        background: #dcf4e6;
+    }
+
+    .wizard-stage {
+        margin-top: 1.15rem;
+        border-top: 1px dashed var(--line);
+        padding-top: 1.15rem;
+    }
+
+    .wizard-stage h2 {
+        margin: 0;
+        font-size: 1.05rem;
+    }
+
+    .form-grid {
+        margin-top: 1rem;
+        display: grid;
+        gap: 0.9rem;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+
+    label {
+        display: grid;
+        gap: 0.35rem;
+        font-size: 0.88rem;
+        color: #314255;
+    }
+
+    .full-width {
+        grid-column: 1 / -1;
+    }
+
+    input,
+    select,
+    textarea,
+    button {
+        font: inherit;
+    }
+
+    input,
+    select,
+    textarea {
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        padding: 0.55rem 0.65rem;
+        background: #fff;
+    }
+
+    .garment-picker {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 2.75rem;
+        gap: 0.55rem;
+        align-items: center;
+    }
+
+    .square-add-button {
+        width: 2.75rem;
+        height: 2.75rem;
+        padding: 0;
+        border-radius: 4px;
+        font-size: 1.35rem;
+        line-height: 1;
+    }
+
+    input[type="checkbox"] {
+        width: 1rem;
+        height: 1rem;
+        padding: 0;
+        border-radius: 0.25rem;
+        accent-color: var(--accent);
+    }
+
+    input:focus,
+    select:focus,
+    textarea:focus {
+        outline: 2px solid rgba(0, 95, 115, 0.25);
+        border-color: var(--accent);
+    }
+
+    input[type="checkbox"]:focus {
+        outline: 2px solid rgba(0, 95, 115, 0.3);
+        outline-offset: 3px;
+    }
+
+    .checkbox-row {
+        display: inline-flex;
+        flex-wrap: wrap;
+        gap: 0.65rem;
+        align-items: center;
+        justify-content: flex-start;
+    }
+
+    .measurement-table {
+        margin-top: 0.75rem;
+        display: grid;
+        gap: 0.42rem;
+    }
+
+    .add-row-button {
+        justify-self: center;
+        width: 2.25rem;
+        height: 2.25rem;
+        padding: 0;
+        border-radius: 4px;
+        font-size: 1.15rem;
+        line-height: 1;
+    }
+
+    .measurement-toolbar,
+    .photo-toolbar {
+        margin-top: 1rem;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+    }
+
+    .measurement-toolbar p,
+    .photo-help,
+    .field-note,
+    .muted-note {
+        margin: 0;
+        color: #546575;
+        font-size: 0.88rem;
+        line-height: 1.5;
+    }
+
+    .measurement-toolbar-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.6rem;
+    }
+
+    .measurement-row {
+        display: grid;
+        gap: 0.45rem;
+        grid-template-columns: 1.4fr 1fr auto;
+        align-items: center;
+    }
+
+    .measurement-row input {
+        padding-block: 0.52rem;
+    }
+
+    .measurement-row button {
+        padding-block: 0.52rem;
+    }
+
+    .photo-grid {
+        margin-top: 1rem;
+        display: grid;
+        gap: 0.85rem;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    }
+
+    .photo-card {
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #ffffff;
+    }
+
+    .photo-card img {
+        display: block;
+        width: 100%;
+        aspect-ratio: 4 / 3;
+        object-fit: cover;
+        background: #e8eef2;
+    }
+
+    .photo-card-copy {
+        display: grid;
+        gap: 0.55rem;
+        padding: 0.8rem;
+    }
+
+    .review-panel {
+        margin-top: 0.9rem;
+        background: #f7fbfd;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 0.8rem 0.9rem;
+    }
+
+    .review-panel p {
+        margin: 0.28rem 0;
+    }
+
+    .wizard-actions {
+        margin-top: 1.25rem;
+        display: flex;
+        justify-content: space-between;
+        gap: 0.65rem;
+    }
+
+    button {
+        border: none;
+        border-radius: 4px;
+        padding: 0.6rem 0.95rem;
+        background: var(--accent);
+        color: white;
+        font-weight: 700;
+        cursor: pointer;
+    }
+
+    button.ghost {
+        background: transparent;
+        color: var(--accent);
+        border: 1px solid var(--line);
+    }
+
+    .upload-button {
+        position: relative;
+        overflow: hidden;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 10rem;
+        border-radius: 4px;
+        background: var(--accent);
+        color: #fff;
+        font-weight: 700;
+        padding: 0.7rem 0.95rem;
+        cursor: pointer;
+    }
+
+    .upload-button input[type="file"] {
+        position: absolute;
+        inset: 0;
+        opacity: 0;
+        cursor: pointer;
+    }
+
+    .modal-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 1000;
+        display: grid;
+        place-items: center;
+        padding: 1.25rem;
+        background: rgba(15, 23, 42, 0.42);
+        backdrop-filter: blur(4px);
+    }
+
+    .garment-modal {
+        width: min(42rem, 100%);
+        display: grid;
+        gap: 1rem;
+        padding: 1.1rem;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fffdf9;
+        box-shadow: 0 24px 70px -30px rgba(15, 23, 42, 0.55);
+    }
+
+    .garment-modal header h2 {
+        margin: 0;
+        font-size: 1.15rem;
+    }
+
+    .garment-modal header p {
+        margin: 0.35rem 0 0;
+        color: #546575;
+        line-height: 1.45;
+    }
+
+    .modal-feedback {
+        padding: 0.7rem 0.8rem;
+        border-radius: 8px;
+        background: #e6f7f2;
+        color: #0b6b53;
+        font-weight: 700;
+    }
+
+    .modal-feedback.error {
+        background: #fee4e2;
+        color: var(--alert);
+    }
+
+    .modal-measurements {
+        display: grid;
+        gap: 0.42rem;
+    }
+
+    .modal-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.65rem;
+        align-items: center;
+    }
+
+    .modal-add-row {
+        justify-self: start;
+    }
+
+    .modal-spacer {
+        flex: 1 1 auto;
+    }
+
+    button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+    }
+
+    .whatsapp-glyph {
+        display: inline-grid;
+        place-items: center;
+        width: 1rem;
+        height: 1rem;
+        margin-right: 0.35rem;
+        border-radius: 999px;
+        background: #25d366;
+        vertical-align: -0.12rem;
+    }
+
+    .whatsapp-glyph::before {
+        content: "";
+        width: 0.42rem;
+        height: 0.42rem;
+        border: 2px solid #ffffff;
+        border-top-color: transparent;
+        border-left-color: transparent;
+        border-radius: 2px;
+        transform: rotate(-35deg);
+    }
+
+    @@media (max-width: 640px) {
+        .wizard-shell {
+            padding: 1rem;
+        }
+
+        .measurement-row {
+            grid-template-columns: 1fr;
+        }
+
+        .wizard-actions {
+            flex-direction: column;
+        }
+
+        .wizard-actions button {
+            width: 100%;
+        }
+    }
+
+    @@keyframes fade-in {
+        from {
+            opacity: 0;
+            transform: translateY(10px);
+        }
+
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+</style>

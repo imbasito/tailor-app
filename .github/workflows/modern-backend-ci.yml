@@ -1,0 +1,36 @@
+name: Modern Backend CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "modern/**"
+      - ".github/workflows/modern-backend-ci.yml"
+  pull_request:
+    paths:
+      - "modern/**"
+      - ".github/workflows/modern-backend-ci.yml"
+
+jobs:
+  validate-modern:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Run test and build gate
+        run: |
+          dotnet test modern/tests/STailor.Core.Tests/STailor.Core.Tests.csproj --configuration Release
+          dotnet test modern/tests/STailor.Modules.Core.Tests/STailor.Modules.Core.Tests.csproj --configuration Release
+          dotnet test modern/tests/STailor.Infrastructure.Tests/STailor.Infrastructure.Tests.csproj --configuration Release
+          dotnet test modern/tests/STailor.UI.Rcl.Tests/STailor.UI.Rcl.Tests.csproj --configuration Release
+          dotnet test modern/tests/STailor.Api.Tests/STailor.Api.Tests.csproj --configuration Release
+          dotnet build modern/src/STailor.Api/STailor.Api.csproj --configuration Release

@@ -1,0 +1,809 @@
+@page "/money"
+@using System.Globalization
+@using Microsoft.AspNetCore.Components.Web
+@using Microsoft.AspNetCore.Components.Web.Virtualization
+@using STailor.Shared.Contracts.Orders
+@using STailor.UI.Rcl.Services
+@inject OrderWorklistService OrderWorklistService
+@inject WorkspaceSettingsService WorkspaceSettings
+
+<section class="money-shell">
+    <header class="money-header">
+        <div>
+            <p class="eyebrow">Payments</p>
+            <h1>Payments & Balances</h1>
+            <p>See what was charged, what was paid, what is still due, and update orders from one screen.</p>
+        </div>
+        <button type="button" @onclick="LoadAsync" disabled="@_isLoading">
+            @(_isLoading ? "Loading..." : "Refresh")
+        </button>
+    </header>
+
+    @if (!string.IsNullOrWhiteSpace(_message))
+    {
+        <div class="@(_isError ? "money-feedback error" : "money-feedback")" role="status">@_message</div>
+    }
+
+    <section class="money-stats" aria-label="Money summary">
+        <article>
+            <span>Total Charged</span>
+            <strong>@FormatMoney(_filteredOrders.Sum(order => order.AmountCharged))</strong>
+        </article>
+        <article>
+            <span>Total Paid</span>
+            <strong>@FormatMoney(_filteredOrders.Sum(order => order.AmountPaid))</strong>
+        </article>
+        <article class="due">
+            <span>Total Due</span>
+            <strong>@FormatMoney(_filteredOrders.Sum(order => order.BalanceDue))</strong>
+        </article>
+        <article>
+            <span>Open Orders</span>
+            <strong>@_filteredOrders.Count(order => order.BalanceDue > 0m)</strong>
+        </article>
+    </section>
+
+    <section class="money-filters">
+        <label>
+            Search
+            <input type="search" @bind="_searchText" @onkeydown="HandleSearchKeyDown" placeholder="Name, phone, garment, status" />
+        </label>
+        <label>
+            View
+            <select @bind="_balanceFilter">
+                <option value="Due">Due only</option>
+                <option value="Paid">Paid up</option>
+                <option value="All">All orders</option>
+            </select>
+        </label>
+        <div class="filter-actions">
+            <button type="button" class="ghost" @onclick="SearchAsync" disabled="@_isLoading">Search</button>
+            <button type="button" class="ghost" @onclick="ClearFiltersAsync" disabled="@_isLoading">Clear</button>
+        </div>
+    </section>
+
+    @if (_isLoading)
+    {
+        <p class="empty-state">Loading money screen...</p>
+    }
+    else if (_filteredOrders.Count == 0)
+    {
+        <p class="empty-state">No orders match this view.</p>
+    }
+    else
+    {
+        <div class="money-list">
+            <Virtualize Items="@_filteredOrders" Context="order" ItemSize="164" OverscanCount="8">
+                @{
+                    var nextStatus = GetNextStatus(order.Status);
+                    var isTakingPayment = _paymentOrderId == order.OrderId;
+                }
+
+                <article class="money-row">
+                    <div class="order-main">
+                        <strong>@order.CustomerName</strong>
+                        <span>@order.PhoneNumber</span>
+                        <span>@order.GarmentType - @FormatStatus(order.Status)</span>
+                    </div>
+
+                    <div class="amount-grid">
+                        <div>
+                            <span>Charged</span>
+                            <strong>@FormatMoney(order.AmountCharged)</strong>
+                        </div>
+                        <div>
+                            <span>Paid</span>
+                            <strong>@FormatMoney(order.AmountPaid)</strong>
+                        </div>
+                        <div class="due">
+                            <span>Due</span>
+                            <strong>@FormatMoney(order.BalanceDue)</strong>
+                        </div>
+                    </div>
+
+                    <div class="row-actions">
+                        @if (nextStatus is not null)
+                        {
+                            <button type="button" class="ghost" disabled="@_isChangingStatus" @onclick="() => AdvanceStatusAsync(order)">
+                                Move to @FormatStatus(nextStatus)
+                            </button>
+                        }
+
+                        <button type="button" class="ghost" @onclick="() => OpenPaymentDetailAsync(order)" disabled="@_isLoadingPaymentDetail">Details</button>
+
+                        @if (order.BalanceDue > 0m)
+                        {
+                            <button type="button" class="primary-small" @onclick="() => StartPayment(order)">Take Payment</button>
+                        }
+                        else
+                        {
+                            <span class="paid-pill">Paid</span>
+                        }
+                    </div>
+
+                    @if (isTakingPayment)
+                    {
+                        <div class="payment-panel">
+                            <label>
+                                Amount
+                                <input type="number" min="0.01" max="@order.BalanceDue" step="0.01" @bind="_paymentAmount" />
+                            </label>
+                            <label>
+                                Note
+                                <input type="text" @bind="_paymentNote" placeholder="Cash, transfer, pickup" />
+                            </label>
+                            <div class="payment-actions">
+                                <button type="button" class="primary-small" disabled="@_isSavingPayment" @onclick="() => SavePaymentAsync(order)">
+                                    @(_isSavingPayment ? "Saving..." : "Save Payment")
+                                </button>
+                                <button type="button" class="ghost" disabled="@_isSavingPayment" @onclick="CancelPayment">Cancel</button>
+                            </div>
+                        </div>
+                    }
+                </article>
+            </Virtualize>
+        </div>
+    }
+
+    @if (_isPaymentDetailModalOpen)
+    {
+        <div class="payment-modal-backdrop" role="dialog" aria-modal="true" aria-label="Payment details">
+            <section class="payment-detail-modal">
+                <header class="modal-header">
+                    <div>
+                        <p class="eyebrow">Payment Details</p>
+                        <h2>@(_selectedPaymentDetail?.CustomerName ?? "Loading order")</h2>
+                    </div>
+                    <button type="button" class="ghost icon-button" aria-label="Close payment details" @onclick="ClosePaymentDetail">x</button>
+                </header>
+
+                @if (_isLoadingPaymentDetail)
+                {
+                    <p class="empty-state">Loading payment details...</p>
+                }
+                else if (!string.IsNullOrWhiteSpace(_paymentDetailError))
+                {
+                    <div class="money-feedback error" role="alert">@_paymentDetailError</div>
+                }
+                else if (_selectedPaymentDetail is not null)
+                {
+                    <div class="detail-summary-grid">
+                        <article>
+                            <span>Order</span>
+                            <strong>@FormatOrderToken(_selectedPaymentDetail.OrderId)</strong>
+                        </article>
+                        <article>
+                            <span>Garment</span>
+                            <strong>@_selectedPaymentDetail.GarmentType</strong>
+                        </article>
+                        <article>
+                            <span>Status</span>
+                            <strong>@FormatStatus(_selectedPaymentDetail.Status)</strong>
+                        </article>
+                        <article>
+                            <span>Due Date</span>
+                            <strong>@FormatDate(_selectedPaymentDetail.DueAtUtc)</strong>
+                        </article>
+                    </div>
+
+                    <div class="detail-summary-grid money-totals">
+                        <article>
+                            <span>Charged</span>
+                            <strong>@FormatMoney(_selectedPaymentDetail.AmountCharged)</strong>
+                        </article>
+                        <article>
+                            <span>Paid</span>
+                            <strong>@FormatMoney(_selectedPaymentDetail.AmountPaid)</strong>
+                        </article>
+                        <article class="due">
+                            <span>Balance</span>
+                            <strong>@FormatMoney(_selectedPaymentDetail.BalanceDue)</strong>
+                        </article>
+                    </div>
+
+                    <section class="payment-history">
+                        <h3>Payment History</h3>
+                        @if (_selectedPaymentDetail.Payments.Count == 0)
+                        {
+                            <p class="empty-state">No payments recorded yet.</p>
+                        }
+                        else
+                        {
+                            @foreach (var payment in _selectedPaymentDetail.Payments.OrderByDescending(payment => payment.PaidAtUtc))
+                            {
+                                <article class="payment-history-item">
+                                    <div>
+                                        <strong>@FormatMoney(payment.Amount)</strong>
+                                        <span>@FormatDateTime(payment.PaidAtUtc)</span>
+                                    </div>
+                                    <p>@(string.IsNullOrWhiteSpace(payment.Note) ? "No note" : payment.Note)</p>
+                                </article>
+                            }
+                        }
+                    </section>
+                }
+            </section>
+        </div>
+    }
+</section>
+
+@code {
+    private readonly List<OrderWorklistItemDto> _orders = [];
+    private List<OrderWorklistItemDto> _filteredOrders = [];
+    private bool _isLoading = true;
+    private bool _isSavingPayment;
+    private bool _isChangingStatus;
+    private string _searchText = string.Empty;
+    private string _balanceFilter = "Due";
+    private string? _message;
+    private bool _isError;
+    private Guid? _paymentOrderId;
+    private decimal? _paymentAmount;
+    private string? _paymentNote;
+    private bool _isPaymentDetailModalOpen;
+    private bool _isLoadingPaymentDetail;
+    private string? _paymentDetailError;
+    private OrderWorkspaceDetailDto? _selectedPaymentDetail;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _isLoading = true;
+        _message = null;
+        _isError = false;
+
+        var result = await OrderWorklistService.GetAsync(
+            WorkspaceSettings.ApiBaseUrl,
+            includeDelivered: true,
+            maxItems: 500,
+            searchText: string.IsNullOrWhiteSpace(_searchText) ? null : _searchText);
+
+        _isLoading = false;
+
+        if (!result.IsSuccess)
+        {
+            _orders.Clear();
+            _filteredOrders = [];
+            _message = result.ErrorMessage;
+            _isError = true;
+            return;
+        }
+
+        _orders.Clear();
+        _orders.AddRange(result.Items);
+        ApplyFilters();
+    }
+
+    private async Task SearchAsync()
+    {
+        await LoadAsync();
+    }
+
+    private void ApplyFilters()
+    {
+        var query = _searchText.Trim();
+        IEnumerable<OrderWorklistItemDto> orders = _orders;
+
+        orders = _balanceFilter switch
+        {
+            "Due" => orders.Where(order => order.BalanceDue > 0m),
+            "Paid" => orders.Where(order => order.BalanceDue <= 0m),
+            _ => orders,
+        };
+
+        if (!string.IsNullOrWhiteSpace(query))
+        {
+            orders = orders.Where(order =>
+                order.CustomerName.Contains(query, StringComparison.OrdinalIgnoreCase)
+                || order.PhoneNumber.Contains(query, StringComparison.OrdinalIgnoreCase)
+                || order.GarmentType.Contains(query, StringComparison.OrdinalIgnoreCase)
+                || order.Status.Contains(query, StringComparison.OrdinalIgnoreCase)
+                || order.OrderId.ToString().Contains(query, StringComparison.OrdinalIgnoreCase));
+        }
+
+        _filteredOrders = orders
+            .OrderByDescending(order => order.BalanceDue)
+            .ThenBy(order => order.CustomerName, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private async Task ClearFiltersAsync()
+    {
+        _searchText = string.Empty;
+        _balanceFilter = "Due";
+        await LoadAsync();
+    }
+
+    private async Task HandleSearchKeyDown(KeyboardEventArgs args)
+    {
+        if (string.Equals(args.Key, "Enter", StringComparison.OrdinalIgnoreCase))
+        {
+            await SearchAsync();
+        }
+    }
+
+    private void StartPayment(OrderWorklistItemDto order)
+    {
+        _paymentOrderId = order.OrderId;
+        _paymentAmount = order.BalanceDue;
+        _paymentNote = null;
+        _message = null;
+        _isError = false;
+    }
+
+    private void CancelPayment()
+    {
+        _paymentOrderId = null;
+        _paymentAmount = null;
+        _paymentNote = null;
+    }
+
+    private async Task OpenPaymentDetailAsync(OrderWorklistItemDto order)
+    {
+        _isPaymentDetailModalOpen = true;
+        _isLoadingPaymentDetail = true;
+        _paymentDetailError = null;
+        _selectedPaymentDetail = null;
+
+        var result = await OrderWorklistService.GetDetailAsync(WorkspaceSettings.ApiBaseUrl, order.OrderId);
+        _isLoadingPaymentDetail = false;
+
+        if (!result.IsSuccess || result.Order is null)
+        {
+            _paymentDetailError = result.ErrorMessage ?? "Unable to load payment details.";
+            return;
+        }
+
+        _selectedPaymentDetail = result.Order;
+    }
+
+    private void ClosePaymentDetail()
+    {
+        _isPaymentDetailModalOpen = false;
+        _isLoadingPaymentDetail = false;
+        _paymentDetailError = null;
+        _selectedPaymentDetail = null;
+    }
+
+    private async Task SavePaymentAsync(OrderWorklistItemDto order)
+    {
+        if (_paymentAmount is null || _paymentAmount <= 0m)
+        {
+            _message = "Payment amount must be greater than zero.";
+            _isError = true;
+            return;
+        }
+
+        if (_paymentAmount > order.BalanceDue)
+        {
+            _message = "Payment cannot be more than the amount due.";
+            _isError = true;
+            return;
+        }
+
+        _isSavingPayment = true;
+        var result = await OrderWorklistService.AddPaymentAsync(
+            WorkspaceSettings.ApiBaseUrl,
+            order.OrderId,
+            _paymentAmount.Value,
+            _paymentNote);
+        _isSavingPayment = false;
+
+        if (!result.IsSuccess)
+        {
+            _message = result.ErrorMessage;
+            _isError = true;
+            return;
+        }
+
+        CancelPayment();
+        _message = "Payment saved.";
+        _isError = false;
+        await LoadAsync();
+    }
+
+    private async Task AdvanceStatusAsync(OrderWorklistItemDto order)
+    {
+        var nextStatus = GetNextStatus(order.Status);
+        if (nextStatus is null)
+        {
+            return;
+        }
+
+        _isChangingStatus = true;
+        var result = await OrderWorklistService.TransitionStatusAsync(
+            WorkspaceSettings.ApiBaseUrl,
+            order.OrderId,
+            nextStatus);
+        _isChangingStatus = false;
+
+        if (!result.IsSuccess)
+        {
+            _message = result.ErrorMessage;
+            _isError = true;
+            return;
+        }
+
+        _message = $"Order moved to {FormatStatus(nextStatus)}.";
+        _isError = false;
+        await LoadAsync();
+    }
+
+    private static string? GetNextStatus(string status)
+    {
+        return status switch
+        {
+            "New" => "InProgress",
+            "InProgress" => "TrialFitting",
+            "TrialFitting" => "Rework",
+            "Rework" => "Ready",
+            "Ready" => "Delivered",
+            _ => null,
+        };
+    }
+
+    private static string FormatStatus(string status)
+    {
+        if (string.IsNullOrWhiteSpace(status))
+        {
+            return "Unknown";
+        }
+
+        return string.Concat(status.Select((character, index) =>
+            index > 0 && char.IsUpper(character) ? $" {character}" : character.ToString()));
+    }
+
+    private static string FormatMoney(decimal value)
+    {
+        return value.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static string FormatDate(DateTimeOffset value)
+    {
+        return value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+    }
+
+    private static string FormatDateTime(DateTimeOffset value)
+    {
+        return value.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+    }
+
+    private static string FormatOrderToken(Guid orderId)
+    {
+        return orderId.ToString()[..8];
+    }
+}
+
+<style>
+    .money-shell {
+        display: grid;
+        gap: 1rem;
+    }
+
+    .money-header,
+    .money-filters,
+    .money-row {
+        border: 1px solid #dbe4ec;
+        border-radius: 8px;
+        background: #ffffff;
+        box-shadow: 0 16px 34px -30px rgba(20, 32, 43, 0.24);
+    }
+
+    .money-header {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        align-items: flex-start;
+        padding: 1rem;
+    }
+
+    .money-header h1 {
+        margin: 0;
+    }
+
+    .money-header p {
+        margin: 0.35rem 0 0;
+        color: #617284;
+        line-height: 1.5;
+    }
+
+    .eyebrow {
+        margin: 0 0 0.35rem;
+        color: #b86a24;
+        font-size: 0.73rem;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+    }
+
+    .money-stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+        gap: 0.85rem;
+    }
+
+    .money-stats article {
+        padding: 0.95rem;
+        border: 1px solid #dbe4ec;
+        border-radius: 8px;
+        background: #f9fbfd;
+    }
+
+    .money-stats span,
+    .amount-grid span,
+    .order-main span {
+        display: block;
+        color: #647485;
+        font-size: 0.84rem;
+    }
+
+    .money-stats strong {
+        display: block;
+        margin-top: 0.25rem;
+        color: #172635;
+        font-size: 1.35rem;
+    }
+
+    .money-stats .due strong,
+    .amount-grid .due strong {
+        color: #a33225;
+    }
+
+    .money-filters {
+        display: grid;
+        grid-template-columns: minmax(220px, 1fr) minmax(150px, 220px) auto;
+        gap: 0.75rem;
+        align-items: end;
+        padding: 0.95rem;
+    }
+
+    .money-filters label,
+    .payment-panel label {
+        display: grid;
+        gap: 0.35rem;
+        font-weight: 700;
+        color: #203443;
+    }
+
+    .money-filters input,
+    .money-filters select,
+    .payment-panel input {
+        border: 1px solid #d0dae3;
+        border-radius: 4px;
+        padding: 0.65rem 0.75rem;
+        font: inherit;
+    }
+
+    .filter-actions,
+    .row-actions,
+    .payment-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.55rem;
+        align-items: center;
+    }
+
+    .row-actions {
+        justify-content: flex-end;
+    }
+
+    .money-list {
+        display: grid;
+        gap: 0.8rem;
+    }
+
+    .money-row {
+        display: grid;
+        grid-template-columns: minmax(180px, 1fr) minmax(280px, 1fr) auto;
+        gap: 1rem;
+        align-items: center;
+        padding: 0.95rem;
+    }
+
+    .order-main strong {
+        display: block;
+        margin-bottom: 0.2rem;
+        color: #172635;
+    }
+
+    .amount-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(80px, 1fr));
+        gap: 0.6rem;
+    }
+
+    .amount-grid div {
+        padding: 0.55rem;
+        border-radius: 8px;
+        background: #f6f8fa;
+    }
+
+    .amount-grid strong {
+        display: block;
+        margin-top: 0.18rem;
+        color: #172635;
+    }
+
+    .primary-small,
+    .ghost,
+    .money-header button {
+        border: 1px solid #cbd7e1;
+        border-radius: 4px;
+        padding: 0.55rem 0.75rem;
+        font: inherit;
+        font-weight: 700;
+        cursor: pointer;
+    }
+
+    .primary-small,
+    .money-header button {
+        border-color: #0f766e;
+        background: #0f766e;
+        color: #ffffff;
+    }
+
+    .ghost {
+        background: #eef3f6;
+        color: #233847;
+    }
+
+    button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+    }
+
+    .paid-pill {
+        display: inline-flex;
+        align-items: center;
+        min-height: 2.25rem;
+        padding: 0 0.75rem;
+        border-radius: 999px;
+        background: #edf8f2;
+        color: #16613f;
+        font-weight: 800;
+    }
+
+    .payment-panel {
+        grid-column: 1 / -1;
+        display: grid;
+        grid-template-columns: minmax(160px, 220px) minmax(220px, 1fr) auto;
+        gap: 0.75rem;
+        align-items: end;
+        padding: 0.8rem;
+        border: 1px dashed #bfd2bd;
+        border-radius: 8px;
+        background: #fbfdf8;
+    }
+
+    .money-feedback {
+        padding: 0.8rem 0.95rem;
+        border-radius: 8px;
+        background: #edf8f2;
+        color: #13663f;
+        font-weight: 700;
+    }
+
+    .money-feedback.error {
+        background: #fff4f2;
+        color: #9f2f24;
+    }
+
+    .empty-state {
+        margin: 0;
+        color: #64748b;
+    }
+
+    .payment-modal-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 1000;
+        display: grid;
+        place-items: center;
+        padding: 1.25rem;
+        background: rgba(15, 23, 42, 0.42);
+        backdrop-filter: blur(4px);
+    }
+
+    .payment-detail-modal {
+        width: min(46rem, 100%);
+        max-height: min(86vh, 46rem);
+        overflow: auto;
+        display: grid;
+        gap: 1rem;
+        padding: 1rem;
+        border: 1px solid #dbe4ec;
+        border-radius: 8px;
+        background: #ffffff;
+        box-shadow: 0 24px 70px -30px rgba(15, 23, 42, 0.55);
+    }
+
+    .modal-header {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        align-items: flex-start;
+    }
+
+    .modal-header h2 {
+        margin: 0;
+    }
+
+    .icon-button {
+        width: 2.25rem;
+        height: 2.25rem;
+        padding: 0;
+    }
+
+    .detail-summary-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 0.65rem;
+    }
+
+    .detail-summary-grid article,
+    .payment-history-item {
+        border: 1px solid #dbe4ec;
+        border-radius: 8px;
+        background: #f9fbfd;
+        padding: 0.75rem;
+    }
+
+    .detail-summary-grid span,
+    .payment-history-item span {
+        display: block;
+        color: #647485;
+        font-size: 0.82rem;
+    }
+
+    .detail-summary-grid strong,
+    .payment-history-item strong {
+        color: #172635;
+    }
+
+    .money-totals .due strong {
+        color: #a33225;
+    }
+
+    .payment-history {
+        display: grid;
+        gap: 0.65rem;
+    }
+
+    .payment-history h3 {
+        margin: 0;
+        font-size: 1rem;
+    }
+
+    .payment-history-item {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        align-items: flex-start;
+    }
+
+    .payment-history-item p {
+        margin: 0;
+        color: #475569;
+        text-align: right;
+    }
+
+    @@media (max-width: 980px) {
+        .money-row,
+        .money-filters,
+        .payment-panel {
+            grid-template-columns: 1fr;
+        }
+
+        .payment-history-item {
+            flex-direction: column;
+        }
+
+        .payment-history-item p {
+            text-align: left;
+        }
+    }
+</style>

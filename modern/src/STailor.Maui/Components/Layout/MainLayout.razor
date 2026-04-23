@@ -1,0 +1,14 @@
+@inject STailor.UI.Rcl.Services.WorkspaceSettingsService WorkspaceSettings
+@inherits LayoutComponentBase
+
+<div class="shell">
+    <aside class="shell-sidebar">
+        <NavMenu />
+    </aside>
+
+    <main class="shell-main">
+        <article class="shell-content">
+            @Body
+        </article>
+    </main>
+</div>
